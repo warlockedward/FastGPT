@@ -1,0 +1,42 @@
+x-plugin-auth-token: &x-plugin-auth-token 'token'
+x-aiproxy-token: &x-aiproxy-token 'token'
+x-share-db-config: &x-share-db-config
+  MONGODB_URI: mongodb://myusername:mypassword@mongo:27017/fastgpt?authSource=admin
+  DB_MAX_LINK: 100
+  REDIS_URL: redis://default:mypassword@redis:6379
+  STORAGE_VENDOR: minio
+  STORAGE_REGION: us-east-1
+  STORAGE_ACCESS_KEY_ID: minioadmin
+  STORAGE_SECRET_ACCESS_KEY: minioadmin
+  STORAGE_PUBLIC_BUCKET: fastgpt-public
+  STORAGE_PRIVATE_BUCKET: fastgpt-private
+  STORAGE_EXTERNAL_ENDPOINT: http://192.168.0.2:9000
+  STORAGE_S3_ENDPOINT: http://fastgpt-minio:9000
+  STORAGE_S3_FORCE_PATH_STYLE: true
+  STORAGE_S3_MAX_RETRIES: 3
+x-log-config: &x-log-config
+  LOG_ENABLE_CONSOLE: true
+  LOG_CONSOLE_LEVEL: debug
+  LOG_ENABLE_OTEL: false
+  LOG_OTEL_LEVEL: info
+  LOG_OTEL_URL: http://localhost:4318/v1/logs
+
+version: '3.3'
+services:
+  opencode-agent:
+    image: fastgpt/opencode-agent:latest
+    container_name: fastgpt-opencode-agent
+    ports:
+      - "8080:8080"
+    environment:
+      - FASTGPT_BASE_URL=http://fastgpt:3000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MONGODB_URI=${MONGODB_URI}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - REDIS_URL=${REDIS_URL}
+    networks:
+      - fastgpt
+    depends_on:
+      - fastgpt
+      - mongo
+      - redis
