@@ -43,3 +43,6 @@ projects/app/worker/
 
 # Agent
 .codex
+
+# Worktrees
+.worktrees/
