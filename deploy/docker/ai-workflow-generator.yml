@@ -1,0 +1,165 @@
+# AI Workflow Generator - Docker Compose
+# 
+# This compose file runs the AI Workflow Generator service along with
+# its required dependencies (MongoDB, Redis) and optionally integrates
+# with an existing FastGPT instance.
+#
+# Usage:
+#   cp docker-compose.ai-workflow-generator.yml docker-compose.override.yml
+#   # Edit .env file with your configuration
+#   docker-compose up -d
+#
+# Or run directly:
+#   docker-compose -f docker-compose.ai-workflow-generator.yml up -d
+
+x-shared-config: &x-shared-config
+  LOG_ENABLE_CONSOLE: "true"
+  LOG_CONSOLE_LEVEL: "debug"
+  LOG_ENABLE_OTEL: "false"
+
+x-db-config: &x-db-config
+  MONGODB_URI: mongodb://aiworkflow:aiworkflow123@mongo-aiworkflow:27017/aiworkflow?authSource=admin
+  DB_MAX_LINK: 100
+  REDIS_URL: redis://:aiworkflow123@redis-aiworkflow:6379
+
+x-storage-config: &x-storage-config
+  STORAGE_VENDOR: minio
+  STORAGE_REGION: us-east-1
+  STORAGE_ACCESS_KEY_ID: minioadmin
+  STORAGE_SECRET_ACCESS_KEY: minioadmin
+  STORAGE_PUBLIC_BUCKET: aiworkflow-public
+  STORAGE_PRIVATE_BUCKET: aiworkflow-private
+  STORAGE_EXTERNAL_ENDPOINT: http://localhost:9000
+  STORAGE_S3_ENDPOINT: http://minio-aiworkflow:9000
+  STORAGE_S3_FORCE_PATH_STYLE: "true"
+
+version: '3.8'
+
+services:
+  # ========================
+  # AI Workflow Generator Agent (Python FastAPI)
+  # ========================
+  ai-workflow-agent:
+    build:
+      context: ../projects/opencode-agent
+      dockerfile: Dockerfile
+    container_name: fastgpt-ai-workflow-agent
+    ports:
+      - "8000:8000"
+    environment:
+      # Service configuration
+      - APP_ENV=development
+      - LOG_LEVEL=debug
+      
+      # FastGPT Integration
+      - FASTGPT_API_URL=${FASTGPT_API_URL:-http://host.docker.internal:3000}
+      - FASTGPT_API_KEY=${FASTGPT_API_KEY}
+      
+      # Database (use existing or the ones defined below)
+      - MONGODB_URI=${MONGODB_URI:-mongodb://aiworkflow:aiworkflow123@mongo-aiworkflow:27017/aiworkflow?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:aiworkflow123@redis-aiworkflow:6379}
+      
+      # Storage (optional)
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio-aiworkflow:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    env_file:
+      - .env.ai-workflow
+    volumes:
+      - ../projects/opencode-agent:/app
+    networks:
+      - ai-workflow-network
+    depends_on:
+      mongo-aiworkflow:
+        condition: service_healthy
+      redis-aiworkflow:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ========================
+  # MongoDB for Session Storage
+  # ========================
+  mongo-aiworkflow:
+    image: mongo:7.0
+    container_name: fastgpt-mongo-aiworkflow
+    ports:
+      - "27018:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: aiworkflow
+      MONGO_INITDB_ROOT_PASSWORD: aiworkflow123
+      MONGO_INITDB_DATABASE: aiworkflow
+    volumes:
+      - mongo-aiworkflow-data:/data/db
+      - ./init/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+
+  # ========================
+  # Redis for Caching & Queue
+  # ========================
+  redis-aiworkflow:
+    image: redis:7-alpine
+    container_name: fastgpt-redis-aiworkflow
+    ports:
+      - "6380:6379"
+    command: redis-server --requirepass aiworkflow123
+    volumes:
+      - redis-aiworkflow-data:/data
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================
+  # MinIO for File Storage (Optional)
+  # ========================
+  minio-aiworkflow:
+    image: minio/minio:latest
+    container_name: fastgpt-minio-aiworkflow
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-aiworkflow-data:/data
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+networks:
+  ai-workflow-network:
+    driver: bridge
+
+volumes:
+  mongo-aiworkflow-data:
+  redis-aiworkflow-data:
+  minio-aiworkflow-data:
