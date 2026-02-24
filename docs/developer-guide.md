@@ -2,7 +2,7 @@
 
 ## Overview
 
-AI Workflow Generator allows users to create FastGPT workflows through natural language conversations. The system uses LLM to analyze user intent and generate valid workflow configurations.
+AI Workflow Generator allows users to create FastGPT workflows through natural language conversations. The system uses vLLM (local LLM) to analyze user intent and generate valid workflow configurations.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ AI Workflow Generator allows users to create FastGPT workflows through natural l
 ┌─────────────────────────────────────────────────────────────────┐
 │                    API Layer (Next.js)                          │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────┐  │
-│  │  /api/chat      │  │  /api/workflow  │  │  /api/session │  │
+│  │  /api/chat      │  │  /api/workflow  │  │  /api/nodes  │  │
 │  └────────┬────────┘  └────────┬────────┘  └──────┬────────┘  │
 └───────────┼────────────────────┼─────────────────┼────────────┘
             │                    │                  │
@@ -26,13 +26,14 @@ AI Workflow Generator allows users to create FastGPT workflows through natural l
 ┌─────────────────────────────────────────────────────────────────┐
 │               Python Agent Service (FastAPI)                    │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────┐  │
-│  │ IntentAnalyzer  │  │ WorkflowGenerator│  │ ErrorHandler │  │
+│  │ IntentAnalyzer  │  │WorkflowGenerator│  │ ErrorHandler │  │
 │  └─────────────────┘  └─────────────────┘  └───────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-            │                    │
-            ▼                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    MongoDB + FastGPT Runtime                    │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │                    vLLM (LLM Brain)                         │  │
+│  │         http://165.154.97.202:38004                       │  │
+│  └─────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,25 +44,28 @@ projects/
 └── opencode-agent/           # Python FastAPI service
     ├── src/
     │   ├── agent/
-    │   │   ├── core.py          # Main workflow agent
-    │   │   ├── intent_analyzer.py   # Intent detection
-    │   │   ├── workflow_generator.py # Node generation
+    │   │   ├── core.py              # Main workflow agent
+    │   │   ├── intent_analyzer.py   # Intent detection (v2.0 complexity)
+    │   │   ├── workflow_generator.py # Node generation (LLM + fallback)
     │   │   └── error_handler.py     # User-friendly errors
     │   ├── api/
-    │   │   └── routes.py        # FastAPI endpoints
+    │   │   └── routes.py            # FastAPI endpoints
     │   └── tools/
-    │       ├── fastgpt.py       # FastGPT API client
-    │       ├── storage.py        # MongoDB operations
-    │       └── queue.py          # Task queue
+    │       ├── fastgpt.py          # FastGPT API client
+    │       ├── storage.py          # MongoDB operations
+    │       └── queue.py            # Task queue
     ├── tests/
     │   ├── test_intent_analyzer.py
     │   └── test_workflow_generator.py
     └── pyproject.toml
 
-packages/service/core/workflow/ai/
-├── sessionSchema.ts      # MongoDB session model
-├── sessionController.ts  # Session CRUD operations
-└── pluginSchema.ts      # Plugin configuration
+projects/app/src/pages/api/core/workflow/ai/
+├── chat.ts                  # AI chat endpoint (passes full tool data)
+├── nodes.ts                # Get available nodes with full details
+└── workflow/
+    ├── create.ts           # Create workflow
+    ├── confirm.ts          # Confirm/answer
+    └── validate.ts         # Validate workflow
 ```
 
 ## Quick Start
@@ -81,7 +85,20 @@ pip install -e .
 pip install pytest pytest-asyncio httpx pydantic
 ```
 
-### 2. Run Tests
+### 2. Configure Environment Variables
+
+```bash
+# vLLM Configuration (LLM Brain)
+export VLLM_BASE_URL=http://165.154.97.202:38004
+export VLLM_MODEL=Qwen3-235B-A22B-Thinking-2507
+export VLLM_API_KEY=your-api-key
+
+# FastGPT Configuration
+export FASTGPT_API_URL=http://localhost:3000
+export FASTGPT_API_KEY=your-fastgpt-api-key
+```
+
+### 3. Run Tests
 
 ```bash
 # Run all tests
@@ -94,23 +111,41 @@ python -m pytest tests/test_intent_analyzer.py -v
 python -m pytest tests/ --cov=src --cov-report=html
 ```
 
-### 3. Start Development Server
+### 4. Start Development Server
 
 ```bash
-# Set environment variables
-export FASTGPT_API_URL=http://localhost:3000
-export FASTGPT_API_KEY=your-api-key
-export MONGODB_URI=mongodb://localhost:27017
-
 # Run FastAPI server
 uvicorn src.api.routes:app --reload --port 8000
 ```
+
+## Data Flow
+
+### Full Tool Data Pipeline
+
+1. **User Input** → Frontend sends natural language description
+
+2. **FastGPT Backend** (`chat.ts`)
+   - Calls `/api/core/workflow/ai/nodes` to get full tool details
+   - Extracts: tools (inputs, outputs, tags), nodeTypes, categories
+   - Sends to Python Agent with full context
+
+3. **Python Agent** (`routes.py`)
+   - `extract_tool_context()`: Extracts availablePlugins, nodeTypes, categories
+   - Passes to `WorkflowGenerator.generate()`
+
+4. **WorkflowGenerator** (`workflow_generator.py`)
+   - `_build_system_prompt()`: Creates prompt with all tool/node info
+   - `_call_llm()`: Calls vLLM API for generation
+   - `_parse_llm_response()`: Parses JSON response
+   - Falls back to rule-based generation if LLM fails
+
+5. **Return** workflow to frontend
 
 ## Core Components
 
 ### 1. IntentAnalyzer (`src/agent/intent_analyzer.py`)
 
-Analyzes user messages to determine workflow intent.
+Analyzes user messages to determine workflow intent using complexity analysis v2.0.
 
 **Key Classes:**
 ```python
@@ -122,9 +157,9 @@ class IntentType(str, Enum):
     UNKNOWN = "unknown"
 
 class ComplexityType(str, Enum):
-    SIMPLE = "simple"    # 1-2 nodes
-    MEDIUM = "medium"    # 3-4 nodes
-    COMPLEX = "complex"  # 5+ nodes
+    SIMPLE = "simple"     # Linear flow, no conditions
+    MEDIUM = "medium"    # 1-2 conditions or dependencies
+    COMPLEX = "complex"  # 3+ conditions + external integration
 
 class IntentAnalyzer:
     async def analyze(self, message: str) -> IntentResult:
@@ -133,15 +168,19 @@ class IntentAnalyzer:
 
 **Usage:**
 ```python
-analyzer = IntentAnalyzer(base_url="http://localhost:3000", api_key="key")
+analyzer = IntentAnalyzer(
+    base_url="http://localhost:38004",
+    api_key="key",
+    model="Qwen3-235B-A22B-Thinking-2507"
+)
 result = await analyzer.analyze("create a chatbot for customer support")
-print(result.intent)    # IntentType.CREATE_WORKFLOW
+print(result.intent)      # IntentType.CREATE_WORKFLOW
 print(result.complexity)  # ComplexityType.SIMPLE
 ```
 
 ### 2. WorkflowGenerator (`src/agent/workflow_generator.py`)
 
-Generates valid FastGPT workflow nodes from requirements.
+Generates valid FastGPT workflow nodes using LLM with fallback to rules.
 
 **Key Classes:**
 ```python
@@ -150,16 +189,25 @@ class FlowNodeType(str, Enum):
     CHAT_NODE = "chatNode"
     DATASET_SEARCH = "datasetSearchNode"
     ANSWER_NODE = "answerNode"
+    IF_ELSE = "ifElseNode"
+    HTTP_REQUEST = "httpRequest468"
+    CODE = "code"
     # ... other node types
 
 class WorkflowGenerator:
+    def __init__(self, base_url=None, api_key=None, model=None):
+        # Uses VLLM_BASE_URL, VLLM_MODEL env vars
+
     async def generate(
         self, 
         intent: str, 
         complexity: str, 
-        requirements: str
+        requirements: str,
+        available_plugins: List[Dict] = None,
+        node_types: List[Dict] = None,
+        categories: List[Dict] = None
     ) -> WorkflowResult:
-        """Generate workflow nodes and edges"""
+        """Generate workflow using LLM with rule-based fallback"""
 
     async def validate(
         self, 
@@ -171,16 +219,22 @@ class WorkflowGenerator:
 
 **Usage:**
 ```python
-generator = WorkflowGenerator()
+generator = WorkflowGenerator(
+    base_url="http://165.154.97.202:38004",
+    model="Qwen3-235B-A22B-Thinking-2507"
+)
 result = await generator.generate(
     intent="create_workflow",
     complexity="medium",
-    requirements="chatbot with knowledge base"
+    requirements="chatbot with knowledge base",
+    available_plugins=[{"name": "weather", "description": "Get weather", "flowNodeType": "tool"}],
+    node_types=[{"id": "chatNode", "label": "AI 对话", "category": "ai"}],
+    categories=[{"id": "ai", "label": "AI 节点"}]
 )
 
 print(f"Nodes: {len(result.nodes)}")
 print(f"Edges: {len(result.edges)}")
-# Access nodes: result.nodes[0].nodeId, .flowNodeType, .position
+# Access: result.nodes[0].nodeId, .flowNodeType, .position
 ```
 
 **Generated Node Types by Complexity:**
@@ -195,24 +249,6 @@ print(f"Edges: {len(result.edges)}")
 
 Provides user-friendly error messages with suggestions.
 
-**Key Classes:**
-```python
-class ErrorCategory(str, Enum):
-    VALIDATION = "validation"
-    LLM = "llm"
-    WORKFLOW = "workflow"
-    SESSION = "session"
-    NETWORK = "network"
-    AUTHENTICATION = "authentication"
-    UNKNOWN = "unknown"
-
-def format_error_response(error: Exception) -> Dict:
-    """Convert exception to user-friendly response"""
-
-def format_validation_response(errors: List[str]) -> Dict:
-    """Format validation errors for API response"""
-```
-
 **Response Format:**
 ```json
 {
@@ -220,43 +256,9 @@ def format_validation_response(errors: List[str]) -> Dict:
   "message": "Your workflow needs a starting point.",
   "technical": "workflow must have a workflowStart node",
   "suggestions": [
-    "Add a 'Workflow Start' node as the entry point",
-    "This is required for the workflow to run"
+    "Add a 'Workflow Start' node as the entry point"
   ],
   "canRetry": true
-}
-```
-
-## MongoDB Schema
-
-### Session Schema (`packages/service/core/workflow/ai/sessionSchema.ts`)
-
-```typescript
-interface AiWorkflowSession {
-  teamId: string;
-  tmbId: string;
-  sessionId: string;
-  mode: 'create' | 'optimize' | 'extend';
-  status: 'active' | 'completed' | 'cancelled';
-  messages: ChatMessage[];
-  generatedWorkflowId?: string;
-  
-  // Workflow state tracking
-  workflowState: {
-    nodes: WorkflowNode[];
-    edges: WorkflowEdge[];
-    intent: {
-      type: 'create_workflow' | 'modify_workflow' | 'ask_question' | 'clarify' | 'unknown';
-    };
-    complexity: 'simple' | 'medium' | 'complex';
-    requirements?: string;
-    isValid: boolean;
-    validationErrors: string[];
-    version: number;
-  };
-  
-  createdAt: Date;
-  updatedAt: Date;
 }
 ```
 
@@ -284,6 +286,42 @@ Response:
     "nodes": [...],
     "edges": [...]
   }
+}
+```
+
+### Nodes Endpoint (Extended)
+
+**GET** `/api/core/workflow/ai/nodes?teamId=xxx`
+
+Returns full tool and node type information:
+
+```json
+{
+  "tools": [
+    {
+      "id": "tool_xxx",
+      "name": "天气查询",
+      "description": "获取指定城市的天气信息",
+      "flowNodeType": "tool",
+      "installed": true,
+      "inputs": [...],
+      "outputs": [...],
+      "tags": ["utility"],
+      "version": "1.0.0"
+    }
+  ],
+  "nodeTypes": [
+    {
+      "id": "workflowStart",
+      "label": "开始",
+      "category": "core",
+      "description": "工作流入口节点"
+    }
+  ],
+  "categories": [
+    {"id": "core", "label": "核心节点"},
+    {"id": "ai", "label": "AI 节点"}
+  ]
 }
 ```
 
@@ -319,18 +357,17 @@ class FlowNodeType(str, Enum):
     NEW_NODE = "newNodeType"
 ```
 
-2. **Add node template** in `_create_node()`:
+2. **Add node metadata** in `_build_node_type_metadata()`:
+```python
+"newNodeType": {"label": "新节点", "category": "custom", "description": "Description"}
+```
+
+3. **Add name mapping** in `_create_node()`:
 ```python
 name_map = {
     # ... existing
     FlowNodeType.NEW_NODE.value: "New Node Name",
 }
-```
-
-3. **Add validation** if needed in `validate()`:
-```python
-if FlowNodeType.NEW_NODE.value not in node_types:
-    warnings.append("Consider adding a New Node for better functionality")
 ```
 
 4. **Add tests:**
@@ -402,6 +439,16 @@ async def test_full_workflow():
     assert validation.is_valid
 ```
 
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VLLM_BASE_URL` | vLLM API address | `http://fastgpt:3000` |
+| `VLLM_MODEL` | Model name | `Qwen3-235B-A22B-Thinking-2507` |
+| `VLLM_API_KEY` | API key | - |
+| `FASTGPT_API_URL` | FastGPT API address | `http://fastgpt:3000` |
+| `FASTGPT_API_KEY` | FastGPT API key | - |
+
 ## Common Issues
 
 ### 1. Import Errors
@@ -415,12 +462,14 @@ pip install -e .
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 ```
 
-### 2. LLM API Errors
+### 2. vLLM Connection Errors
 
-The IntentAnalyzer falls back to rule-based analysis if LLM fails. Check:
-- `FASTGPT_API_URL` environment variable
-- `FASTGPT_API_KEY` is valid
-- Network connectivity
+Check:
+- `VLLM_BASE_URL` is correct and accessible
+- `VLLM_MODEL` is available on the server
+- Network connectivity to vLLM server
+
+The system will fall back to rule-based generation if LLM fails.
 
 ### 3. Validation Failures
 
@@ -441,6 +490,7 @@ Common validation errors:
 ## Resources
 
 - [FastGPT Workflow Documentation](https://docs.fastgpt.ai/)
+- [vLLM Documentation](https://docs.vllm.ai/)
 - [Pydantic Documentation](https://docs.pydantic.dev/)
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [Pytest Documentation](https://docs.pytest.org/)
