@@ -339,7 +339,21 @@ export const dispatchRunAgent = async (props: DispatchAgentModuleProps): Promise
       if (result) return result;
     }
 
+    let loopIterationCount = 0;
+    const MAX_LOOP_ITERATIONS = 100; // 安全限制，防止无限循环
+
     while (true) {
+      loopIterationCount++;
+      
+      // 安全检查：防止无限循环
+      if (loopIterationCount > MAX_LOOP_ITERATIONS) {
+        getLogger(LogCategories.MODULE.AI.AGENT).error('Agent loop exceeded maximum iterations', {
+          iterations: loopIterationCount,
+          maxIterations: MAX_LOOP_ITERATIONS
+        });
+        break;
+      }
+
       if (checkIsStopping()) {
         break;
       }

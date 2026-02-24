@@ -287,8 +287,23 @@ export const runWorkflow = async (data: RunWorkflowProps): Promise<DispatchFlowR
   data.workflowDispatchDeep++;
   const isRootRuntime = data.workflowDispatchDeep === 1;
   if (data.workflowDispatchDeep > 20) {
+    // 超过最大深度限制时，记录警告而不是静默返回空结果
+    logger.warn('Workflow max depth exceeded, returning error response', {
+      appId: data.runningAppInfo.id,
+      chatId: data.chatId,
+      depth: data.workflowDispatchDeep
+    });
+
     return {
-      flowResponses: [],
+      flowResponses: [
+        {
+          moduleName: 'Workflow Depth Limit',
+          moduleType: 'system',
+          error: `Workflow exceeded maximum depth of 20. Current depth: ${data.workflowDispatchDeep}. This may indicate a circular dependency or excessive nesting.`,
+          nodeId: 'depth-limit',
+          runningTime: 0
+        }
+      ],
       flowUsages: [],
       debugResponse: {
         memoryEdges: [],
@@ -437,8 +452,18 @@ export const runWorkflow = async (data: RunWorkflowProps): Promise<DispatchFlowR
       if (node) {
         this.runningNodeCount++;
 
+        // 添加安全检查，防止计数异常
+        if (this.runningNodeCount > this.maxConcurrency * 2) {
+          logger.error('Workflow running node count exceeded safety limit', {
+            count: this.runningNodeCount,
+            maxConcurrency: this.maxConcurrency,
+            appId: data.runningAppInfo.id
+          });
+        }
+
         this.checkNodeCanRun(node).finally(() => {
-          this.runningNodeCount--;
+          // 确保计数不会变为负数
+          this.runningNodeCount = Math.max(0, this.runningNodeCount - 1);
           this.processActiveNode();
         });
       }
@@ -687,11 +712,26 @@ export const runWorkflow = async (data: RunWorkflowProps): Promise<DispatchFlowR
         });
       }
 
-      // Update new variables
+      // Update new variables with collision detection
       if (dispatchRes[DispatchNodeResponseKeyEnum.newVariables]) {
+        const newVars = dispatchRes[DispatchNodeResponseKeyEnum.newVariables];
+        const existingKeys = Object.keys(variables);
+        const newKeys = Object.keys(newVars);
+        const collidingKeys = newKeys.filter((key) => existingKeys.includes(key));
+
+        if (collidingKeys.length > 0) {
+          logger.warn('Workflow variable collision detected', {
+            nodeId: node.nodeId,
+            nodeName: node.name,
+            collidingKeys,
+            oldValues: collidingKeys.map((key) => variables[key]),
+            newValues: collidingKeys.map((key) => newVars[key])
+          });
+        }
+
         variables = {
           ...variables,
-          ...dispatchRes[DispatchNodeResponseKeyEnum.newVariables]
+          ...newVars
         };
       }
 

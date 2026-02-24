@@ -58,3 +58,24 @@ export const updatePlugin = (
 export const deletePlugin = (pluginId: string) => {
   return request.delete(`/core/workflow/ai/plugin/${pluginId}`);
 };
+
+export const confirmWorkflow = (data: {
+  sessionId: string;
+  answer?: string;
+  confirmed?: boolean;
+}) => {
+  return request.post('/core/workflow/ai/workflow/confirm', data);
+};
+
+export const validateWorkflow = (data: {
+  workflow: {
+    nodes: any[];
+    edges: any[];
+  };
+  plugins?: Array<{
+    name: string;
+    code: string;
+  }>;
+}) => {
+  return request.post('/core/workflow/ai/workflow/validate', data);
+};
