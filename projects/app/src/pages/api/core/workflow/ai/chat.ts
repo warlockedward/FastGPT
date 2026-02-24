@@ -8,6 +8,37 @@ import type {
 } from '@fastgpt/global/openapi/core/workflow/ai/api';
 import { getSystemToolsWithInstalled } from '@fastgpt/service/core/app/tool/controller';
 
+// Fetch full tool/node data from the nodes API
+async function getWorkflowTools(req: NextApiRequest, teamId: string, isRoot: boolean) {
+  const baseUrl = process.env.FASTGPT_API_URL || 'http://localhost:3000';
+  try {
+    const response = await fetch(`${baseUrl}/api/core/workflow/ai/nodes`, {
+      headers: {
+        Cookie: req.headers.cookie || ''
+      }
+    });
+    if (!response.ok) {
+      throw new Error('Failed to fetch nodes');
+    }
+    return await response.json();
+  } catch (error) {
+    // Fallback to direct fetch if API call fails
+    const tools = await getSystemToolsWithInstalled({ teamId, isRoot });
+    return {
+      tools: tools.map((tool: any) => ({
+        id: tool.id,
+        name: tool.name,
+        description: tool.description || tool.intro || '',
+        flowNodeType: tool.flowNodeType,
+        inputs: tool.inputs || [],
+        outputs: tool.outputs || []
+      })),
+      nodeTypes: [],
+      categories: []
+    };
+  }
+}
+
 async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiChatResponseType> {
   const { teamId, tmbId, userId, isRoot } = await authUserPer({
     req,
@@ -23,14 +54,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiCha
     return Promise.reject('OPENCODE_API_URL is not configured');
   }
 
-  const availableTools = await getSystemToolsWithInstalled({ teamId, isRoot });
-  const availablePlugins = availableTools
-    .filter((tool) => tool.installed)
-    .map((tool) => ({
+  // Get full workflow tools and node types
+  const workflowData = await getWorkflowTools(req, teamId, isRoot);
+  const { tools, nodeTypes, categories } = workflowData;
+
+  // Filter installed plugins with full details
+  const availablePlugins = tools
+    .filter((tool: any) => tool.installed)
+    .map((tool: any) => ({
       id: tool.id,
       name: tool.name,
       description: tool.description,
-      flowNodeType: tool.flowNodeType
+      flowNodeType: tool.flowNodeType,
+      inputs: tool.inputs || [],
+      outputs: tool.outputs || []
     }));
 
   const mode = context?.mode || 'create';
@@ -51,7 +88,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiCha
         sessionId,
         context: {
           existingWorkflow: context?.workflowId,
-          availablePlugins: availablePlugins.map((p) => p.name),
+          // Pass full tool details instead of just names
+          availablePlugins: availablePlugins,
+          // Also include node types and categories for workflow generation
+          nodeTypes: nodeTypes,
+          categories: categories,
           enterpriseSystems: []
         },
         options: {
