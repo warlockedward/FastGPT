@@ -69,28 +69,6 @@ class ValidationResult(BaseModel):
 class WorkflowGenerator:
     """Generates valid FastGPT workflows from requirements using LLM"""
     
-    SIMPLE_NODES = [
-        FlowNodeType.WORKFLOW_START,
-        FlowNodeType.CHAT_NODE,
-        FlowNodeType.ANSWER_NODE
-    ]
-    
-    MEDIUM_NODES = [
-        FlowNodeType.WORKFLOW_START,
-        FlowNodeType.DATASET_SEARCH,
-        FlowNodeType.CHAT_NODE,
-        FlowNodeType.ANSWER_NODE
-    ]
-    
-    COMPLEX_NODES = [
-        FlowNodeType.WORKFLOW_START,
-        FlowNodeType.DATASET_SEARCH,
-        FlowNodeType.CHAT_NODE,
-        FlowNodeType.IF_ELSE,
-        FlowNodeType.CODE,
-        FlowNodeType.ANSWER_NODE
-    ]
-    
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
         self.base_url = base_url or os.environ.get("VLLM_BASE_URL", os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000"))
         self.api_key = api_key or os.environ.get("VLLM_API_KEY", os.environ.get("FASTGPT_API_KEY", ""))
@@ -112,23 +90,120 @@ class WorkflowGenerator:
             "agent": {"label": "AI Agent", "category": "ai", "description": "具有规划能力的 AI Agent"},
             "toolCall": {"label": "工具调用", "category": "integration", "description": "调用外部工具"},
             "code": {"label": "代码执行", "category": "tool", "description": "执行自定义代码"},
-            "variableUpdate": {"label": "变量更新", "category": "variable", "description": "更新工作流变量"},
-            "globalVariable": {"label": "全局变量", "category": "variable", "description": "定义全局变量"},
-            "userSelect": {"label": "用户选择", "category": "input", "description": "让用户从选项中选择"},
-            "formInput": {"label": "表单输入", "category": "input", "description": "用户表单输入"},
-            "readFiles": {"label": "读取文件", "category": "tool", "description": "读取上传的文件"},
-            "loop": {"label": "循环", "category": "control", "description": "循环执行节点"},
-            "loopStart": {"label": "循环开始", "category": "control", "description": "循环开始节点"},
-            "loopEnd": {"label": "循环结束", "category": "control", "description": "循环结束节点"},
-            "pluginInput": {"label": "插件输入", "category": "plugin", "description": "插件输入参数"},
-            "pluginOutput": {"label": "插件输出", "category": "plugin", "description": "插件输出参数"},
-            "textEditor": {"label": "文本编辑", "category": "tool", "description": "富文本编辑器"},
-            "queryExtension": {"label": "查询扩展", "category": "ai", "description": "扩展用户查询"},
-            "tool": {"label": "工具", "category": "integration", "description": "调用已安装的工具"},
-            "toolSet": {"label": "工具集", "category": "integration", "description": "工具集合"},
-            "appModule": {"label": "应用模块", "category": "integration", "description": "调用其他应用"},
-            "pluginModule": {"label": "插件模块", "category": "plugin", "description": "调用插件"}
         }
+    
+    def _get_node_template(self, node_type: str) -> Dict[str, Any]:
+        """Get the proper inputs/outputs for each node type based on FastGPT templates"""
+        
+        templates = {
+            FlowNodeType.WORKFLOW_START.value: {
+                "name": "Workflow Start",
+                "inputs": [
+                    {"key": "userChatInput", "renderTypeList": ["reference", "input"], "label": "User Input", "valueType": "string", "required": True}
+                ],
+                "outputs": [
+                    {"key": "userChatInput", "renderTypeList": ["hidden"], "label": "User Input", "valueType": "string"}
+                ]
+            },
+            FlowNodeType.CHAT_NODE.value: {
+                "name": "AI Chat",
+                "inputs": [
+                    {"key": "systemPrompt", "renderTypeList": ["textarea"], "label": "System Prompt", "valueType": "string", "value": "You are a helpful AI assistant."},
+                    {"key": "history", "renderTypeList": ["reference", "hidden"], "label": "History", "valueType": "array", "value": []},
+                    {"key": "userChatInput", "renderTypeList": ["reference", "input"], "label": "User Question", "valueType": "string", "required": True},
+                    {"key": "settingAiModel", "renderTypeList": ["selectLLMModel"], "label": "AI Model", "valueType": "string"}
+                ],
+                "outputs": [
+                    {"key": "responseText", "renderTypeList": ["hidden"], "label": "AI Response", "valueType": "string"},
+                    {"key": "history", "renderTypeList": ["hidden"], "label": "History", "valueType": "array"}
+                ]
+            },
+            FlowNodeType.ANSWER_NODE.value: {
+                "name": "Answer",
+                "inputs": [
+                    {"key": "responseText", "renderTypeList": ["reference", "textarea"], "label": "Response Content", "valueType": "string", "required": True}
+                ],
+                "outputs": [
+                    {"key": "answerText", "renderTypeList": ["hidden"], "label": "Response", "valueType": "string"}
+                ]
+            },
+            FlowNodeType.DATASET_SEARCH.value: {
+                "name": "Knowledge Base Search",
+                "inputs": [
+                    {"key": "userChatInput", "renderTypeList": ["reference", "input"], "label": "User Question", "valueType": "string", "required": True},
+                    {"key": "datasets", "renderTypeList": ["selectDataset"], "label": "Select Knowledge Base", "valueType": "array"},
+                    {"key": "similarity", "renderTypeList": ["numberInput"], "label": "Similarity Threshold", "valueType": "number", "value": 0.7},
+                    {"key": "limit", "renderTypeList": ["numberInput"], "label": "Max Results", "valueType": "number", "value": 5}
+                ],
+                "outputs": [
+                    {"key": "quoteList", "renderTypeList": ["hidden"], "label": "Search Results", "valueType": "array"}
+                ]
+            },
+            FlowNodeType.IF_ELSE.value: {
+                "name": "Conditional",
+                "inputs": [
+                    {"key": "condition", "renderTypeList": ["input"], "label": "Condition", "valueType": "string", "required": True}
+                ],
+                "outputs": [
+                    {"key": "true", "renderTypeList": ["hidden"], "label": "True Branch", "valueType": "string"},
+                    {"key": "false", "renderTypeList": ["hidden"], "label": "False Branch", "valueType": "string"}
+                ]
+            },
+            FlowNodeType.HTTP_REQUEST.value: {
+                "name": "HTTP Request",
+                "inputs": [
+                    {"key": "url", "renderTypeList": ["input"], "label": "Request URL", "valueType": "string", "required": True},
+                    {"key": "method", "renderTypeList": ["select"], "label": "Method", "valueType": "string", "value": "GET"},
+                    {"key": "headers", "renderTypeList": ["json"], "label": "Headers", "valueType": "object"},
+                    {"key": "body", "renderTypeList": ["json"], "label": "Request Body", "valueType": "object"}
+                ],
+                "outputs": [
+                    {"key": "response", "renderTypeList": ["hidden"], "label": "Response", "valueType": "object"}
+                ]
+            },
+            FlowNodeType.CODE.value: {
+                "name": "Code",
+                "inputs": [
+                    {"key": "code", "renderTypeList": ["JSONEditor"], "label": "Code", "valueType": "string", "value": "const result = input;\nreturn result;"},
+                    {"key": "inputVariables", "renderTypeList": ["reference"], "label": "Input Variables", "valueType": "array"}
+                ],
+                "outputs": [
+                    {"key": "output", "renderTypeList": ["hidden"], "label": "Output", "valueType": "string"}
+                ]
+            },
+            FlowNodeType.CLASSIFY_QUESTION.value: {
+                "name": "Intent Classification",
+                "inputs": [
+                    {"key": "userChatInput", "renderTypeList": ["reference", "input"], "label": "User Question", "valueType": "string", "required": True},
+                    {"key": "classes", "renderTypeList": ["input"], "label": "Classification Labels", "valueType": "string", "value": "Intent 1\nIntent 2\nIntent 3"}
+                ],
+                "outputs": [
+                    {"key": "selectedClassIndex", "renderTypeList": ["hidden"], "label": "Selected Index", "valueType": "number"}
+                ]
+            },
+            FlowNodeType.CONTENT_EXTRACT.value: {
+                "name": "Content Extract",
+                "inputs": [
+                    {"key": "content", "renderTypeList": ["reference", "textarea"], "label": "Content", "valueType": "string", "required": True},
+                    {"key": "instruction", "renderTypeList": ["input", "textarea"], "label": "Extraction Instruction", "valueType": "string"}
+                ],
+                "outputs": [
+                    {"key": "extractedFields", "renderTypeList": ["hidden"], "label": "Extracted Data", "valueType": "object"}
+                ]
+            },
+            FlowNodeType.AGENT.value: {
+                "name": "AI Agent",
+                "inputs": [
+                    {"key": "systemPrompt", "renderTypeList": ["textarea"], "label": "System Prompt", "valueType": "string", "value": "You are an AI agent."},
+                    {"key": "userChatInput", "renderTypeList": ["reference", "input"], "label": "User Input", "valueType": "string"}
+                ],
+                "outputs": [
+                    {"key": "responseText", "renderTypeList": ["hidden"], "label": "Response", "valueType": "string"}
+                ]
+            }
+        }
+        
+        return templates.get(node_type, {"name": node_type, "inputs": [], "outputs": []})
     
     def _build_system_prompt(
         self,
@@ -164,16 +239,6 @@ class WorkflowGenerator:
                 flow_type = plugin.get("flowNodeType", "tool")
                 prompt_parts.append(f"- {name}: {desc} [type: {flow_type}]")
         
-        if categories:
-            prompt_parts.extend([
-                "",
-                "Node categories:"
-            ])
-            for cat in categories:
-                cat_id = cat.get("id", "")
-                cat_label = cat.get("label", cat_id)
-                prompt_parts.append(f"- {cat_id}: {cat_label}")
-        
         prompt_parts.extend([
             "",
             "IMPORTANT OUTPUT FORMAT:",
@@ -196,10 +261,7 @@ class WorkflowGenerator:
             "4. Edges must connect nodes in logical order",
             "5. Use appropriate x, y coordinates for visual layout (x: 250-1000, y: 0-800)",
             "6. Consider the user's requirements and select appropriate nodes",
-            "7. If user mentions knowledge base, dataset, or documents, include datasetSearchNode",
-            "8. If user mentions conditions, branches, or checks, include ifElseNode or classifyQuestion",
-            "9. If user mentions external APIs or webhooks, include httpRequest468",
-            "10. Output ONLY valid JSON, no explanations or markdown"
+            "7. Output ONLY valid JSON, no explanations or markdown"
         ])
         
         return "\n".join(prompt_parts)
@@ -252,13 +314,16 @@ class WorkflowGenerator:
             x = node_data.get("x", 250)
             y = node_data.get("y", 0)
             
+            # Get proper template with inputs/outputs
+            template = self._get_node_template(flow_type)
+            
             nodes.append(WorkflowNode(
                 nodeId=node_id,
                 flowNodeType=flow_type,
                 name=name,
                 position=Position(x=x, y=y),
-                inputs=[],
-                outputs=[]
+                inputs=template.get("inputs", []),
+                outputs=template.get("outputs", [])
             ))
         
         for edge_data in llm_result.get("edges", []):
@@ -325,16 +390,22 @@ class WorkflowGenerator:
             FlowNodeType.AGENT.value: "AI Agent"
         }
         
+        # Get template with inputs/outputs
+        template = self._get_node_template(node_type)
+        node_name = template.get("name", name_map.get(node_type, node_type))
+        inputs = template.get("inputs", [])
+        outputs = template.get("outputs", [])
+        
         x = 250
         y = index * 200
         
         return WorkflowNode(
             nodeId=node_id,
             flowNodeType=node_type,
-            name=name_map.get(node_type, node_type),
+            name=node_name,
             position=Position(x=x, y=y),
-            inputs=[],
-            outputs=[]
+            inputs=inputs,
+            outputs=outputs
         )
     
     def _create_edges(self, nodes: List[WorkflowNode]) -> List[WorkflowEdge]:
