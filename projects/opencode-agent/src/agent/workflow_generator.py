@@ -67,7 +67,7 @@ class ValidationResult(BaseModel):
 
 
 class WorkflowGenerator:
-    """Generates valid FastGPT workflows from requirements"""
+    """Generates valid FastGPT workflows from requirements using LLM"""
     
     SIMPLE_NODES = [
         FlowNodeType.WORKFLOW_START,
@@ -91,10 +91,11 @@ class WorkflowGenerator:
         FlowNodeType.ANSWER_NODE
     ]
     
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
-        self.base_url = base_url or os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
-        self.api_key = api_key or os.environ.get("FASTGPT_API_KEY", "")
-        self.client = httpx.AsyncClient(timeout=30.0)
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
+        self.base_url = base_url or os.environ.get("VLLM_BASE_URL", os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000"))
+        self.api_key = api_key or os.environ.get("VLLM_API_KEY", os.environ.get("FASTGPT_API_KEY", ""))
+        self.model = model or os.environ.get("VLLM_MODEL", "Qwen3-235B-A22B-Thinking-2507")
+        self.client = httpx.AsyncClient(timeout=120.0)
         self._node_type_metadata = self._build_node_type_metadata()
     
     def _build_node_type_metadata(self) -> Dict[str, Dict[str, str]]:
@@ -136,7 +137,7 @@ class WorkflowGenerator:
         categories: List[Dict[str, Any]]
     ) -> str:
         prompt_parts = [
-            "You are an AI Workflow generator. Generate a valid FastGPT workflow based on user requirements.",
+            "You are an AI Workflow generator for FastGPT. Generate a valid FastGPT workflow JSON based on user requirements.",
             "",
             "Available node types:"
         ]
@@ -155,7 +156,7 @@ class WorkflowGenerator:
         if available_plugins:
             prompt_parts.extend([
                 "",
-                "Available installed plugins (tools):"
+                "Available installed plugins (tools) that can be used:"
             ])
             for plugin in available_plugins:
                 name = plugin.get("name", "Unknown")
@@ -175,27 +176,100 @@ class WorkflowGenerator:
         
         prompt_parts.extend([
             "",
-            "Respond with a JSON object:",
-            '{',
+            "IMPORTANT OUTPUT FORMAT:",
+            "Respond ONLY with a valid JSON object, no other text. Use this exact structure:",
+            "{",
             '  "nodes": [',
-            '    {"nodeId": "unique_id", "flowNodeType": "node_type", "name": "Node Name"}',
+            '    {"nodeId": "unique_id", "flowNodeType": "node_type", "name": "Node Name", "x": 0, "y": 0},',
+            '    ...',
             '  ],',
             '  "edges": [',
-            '    {"source": "source_id", "sourceHandle": "out", "target": "target_id", "targetHandle": "in"}',
+            '    {"source": "source_id", "sourceHandle": "out", "target": "target_id", "targetHandle": "in"},',
+            '    ...',
             '  ]',
-            '}',
+            "}",
             "",
-            "Ensure:",
-            "1. workflowStart is the entry point",
-            "2. answerNode is the final output",
-            "3. Edges connect nodes in logical flow",
-            "4. Each node has unique ID"
+            "Requirements:",
+            "1. workflowStart must be the entry point (first node)",
+            "2. The flow must end at answerNode or similar output node",
+            "3. Each node must have a unique nodeId",
+            "4. Edges must connect nodes in logical order",
+            "5. Use appropriate x, y coordinates for visual layout (x: 250-1000, y: 0-800)",
+            "6. Consider the user's requirements and select appropriate nodes",
+            "7. If user mentions knowledge base, dataset, or documents, include datasetSearchNode",
+            "8. If user mentions conditions, branches, or checks, include ifElseNode or classifyQuestion",
+            "9. If user mentions external APIs or webhooks, include httpRequest468",
+            "10. Output ONLY valid JSON, no explanations or markdown"
         ])
         
         return "\n".join(prompt_parts)
     
     def _generate_id(self) -> str:
         return f"node_{uuid.uuid4().hex[:8]}"
+    
+    async def _call_llm(self, system_prompt: str, user_message: str) -> Dict[str, Any]:
+        """Call vLLM API to generate workflow"""
+        url = f"{self.base_url}/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 2000
+        }
+        
+        response = await self.client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        json_start = content.find("{")
+        json_end = content.rfind("}") + 1
+        
+        if json_start >= 0 and json_end > json_start:
+            json_str = content[json_start:json_end]
+            return json.loads(json_str)
+        
+        raise ValueError("No valid JSON found in LLM response")
+    
+    def _parse_llm_response(self, llm_result: Dict[str, Any]) -> tuple:
+        """Parse LLM response into nodes and edges"""
+        nodes = []
+        edges = []
+        
+        for node_data in llm_result.get("nodes", []):
+            node_id = node_data.get("nodeId", self._generate_id())
+            flow_type = node_data.get("flowNodeType", "chatNode")
+            name = node_data.get("name", "Node")
+            x = node_data.get("x", 250)
+            y = node_data.get("y", 0)
+            
+            nodes.append(WorkflowNode(
+                nodeId=node_id,
+                flowNodeType=flow_type,
+                name=name,
+                position=Position(x=x, y=y),
+                inputs=[],
+                outputs=[]
+            ))
+        
+        for edge_data in llm_result.get("edges", []):
+            edges.append(WorkflowEdge(
+                source=edge_data.get("source", ""),
+                sourceHandle=edge_data.get("sourceHandle", "out"),
+                target=edge_data.get("target", ""),
+                targetHandle=edge_data.get("targetHandle", "in")
+            ))
+        
+        return nodes, edges
     
     def _get_nodes_for_complexity(self, complexity: str, requirements: str) -> List[str]:
         requirements_lower = requirements.lower()
@@ -298,6 +372,25 @@ class WorkflowGenerator:
                 node_types,
                 categories
             )
+            
+            user_message = f"""Generate a FastGPT workflow for the following requirement:
+
+{requirements}
+
+Intent: {intent}
+Complexity: {complexity}
+
+Please generate the workflow JSON now."""
+            
+            try:
+                llm_result = await self._call_llm(system_prompt, user_message)
+                nodes, edges = self._parse_llm_response(llm_result)
+                
+                if nodes and edges:
+                    return WorkflowResult(nodes=nodes, edges=edges)
+                
+            except Exception as e:
+                pass
             
             node_types_list = self._get_nodes_for_complexity(complexity, requirements)
             
