@@ -68,6 +68,23 @@ async def chat(request: ChatRequest):
     )
 
 
+def extract_tool_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract available plugins, node types, and categories from request context"""
+    available_plugins = context.get("availablePlugins", [])
+    node_types = context.get("nodeTypes", [])
+    categories = context.get("categories", [])
+    
+    # If availablePlugins is a list of strings (old format), convert to dict format
+    if available_plugins and isinstance(available_plugins[0], str):
+        available_plugins = [{"name": p} for p in available_plugins]
+    
+    return {
+        "availablePlugins": available_plugins,
+        "nodeTypes": node_types,
+        "categories": categories
+    }
+
+
 @app.post("/api/ai-workflow/generate")
 async def generate_workflow(request: GenerateRequest):
     """Generate a new workflow from user intent"""
@@ -96,10 +113,15 @@ async def generate_workflow(request: GenerateRequest):
     try:
         intent_result = await agent["intent_analyzer"].analyze(request.userIntent)
         
+        tool_context = extract_tool_context(request.context or {})
+        
         workflow_result = await agent["workflow_generator"].generate(
             intent=intent_result.intent.value,
             complexity=intent_result.complexity.value,
-            requirements=request.userIntent
+            requirements=request.userIntent,
+            available_plugins=tool_context["availablePlugins"],
+            node_types=tool_context["nodeTypes"],
+            categories=tool_context["categories"]
         )
         
         session_id = request.sessionId or str(uuid.uuid4())
@@ -161,10 +183,15 @@ async def optimize_workflow(request: GenerateRequest):
         
         intent_result = await agent["intent_analyzer"].analyze(request.userIntent)
         
+        tool_context = extract_tool_context(request.context or {})
+        
         workflow_result = await agent["workflow_generator"].generate(
             intent="modify_workflow",
             complexity=intent_result.complexity.value,
-            requirements=request.userIntent
+            requirements=request.userIntent,
+            available_plugins=tool_context["availablePlugins"],
+            node_types=tool_context["nodeTypes"],
+            categories=tool_context["categories"]
         )
         
         session_id = request.sessionId or str(uuid.uuid4())
@@ -245,10 +272,15 @@ async def confirm_workflow(request: ConfirmRequest):
         
         intent_result = await agent["intent_analyzer"].analyze(prompt)
         
+        tool_context = extract_tool_context(context)
+        
         workflow_result = await agent["workflow_generator"].generate(
             intent="create_workflow",
             complexity=intent_result.complexity.value,
-            requirements=prompt
+            requirements=prompt,
+            available_plugins=tool_context["availablePlugins"],
+            node_types=tool_context["nodeTypes"],
+            categories=tool_context["categories"]
         )
         
         return {
@@ -257,7 +289,7 @@ async def confirm_workflow(request: ConfirmRequest):
             "message": "基于您的回答，工作流已更新" if workflow_result.is_valid else "请提供更多信息",
             "workflow": {
                 "nodes": [n.model_dump() for n in workflow_result.nodes],
-                "edges": [e.model_dump() for e in workflow_result.edges]
+                "edges": [e.model_dump() for n in workflow_result.edges]
             } if workflow_result.is_valid else None,
             "questions": None
         }
