@@ -32,6 +32,7 @@ interface Message {
   };
   status?: 'ready' | 'need_more_info' | 'failed' | 'generating';
   questions?: Question[];
+  nextQuestion?: string;
 }
 
 interface AIWorkflowChatProps {
@@ -125,8 +126,9 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
           id: (Date.now() + 1).toString(),
           role: 'assistant',
           content: response.message || response.nextQuestion || '',
-          workflowPreview: response.workflow,
-          status: response.status
+          workflowPreview: response.workflow || response.workflowPreview,
+          status: response.status,
+          questions: response.questions
         };
 
         setMessages((prev) => [...prev, assistantMessage]);

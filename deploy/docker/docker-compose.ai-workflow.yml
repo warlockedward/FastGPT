@@ -1,0 +1,187 @@
+# AI Workflow Generator - Docker Compose
+#
+# This compose file runs the AI Workflow Generator service along with
+# its required dependencies (MongoDB, Redis) and integrates
+# with an existing FastGPT instance.
+#
+# Includes:
+# - AI Workflow Generator Agent (Python FastAPI) - Brain for workflow generation
+# - OpenSandbox - Code validation and testing
+# - MongoDB - Session and plugin storage
+# - Redis - Caching and queue
+#
+# Usage:
+#   cp docker/.env.example.ai-workflow .env.ai-workflow
+#   # Edit .env file with your configuration
+#   docker-compose -f docker/docker-compose.ai-workflow.yml up -d
+#
+
+x-shared-config: &x-shared-config
+  LOG_ENABLE_CONSOLE: 'true'
+  LOG_CONSOLE_LEVEL: 'debug'
+  LOG_ENABLE_OTEL: 'false'
+
+x-db-config: &x-db-config
+  MONGODB_URI: mongodb://aiworkflow:aiworkflow123@mongo-aiworkflow:27017/aiworkflow?authSource=admin
+  DB_MAX_LINK: 100
+  REDIS_URL: redis://:aiworkflow123@redis-aiworkflow:6379
+
+version: '3.8'
+
+services:
+  # ========================
+  # AI Workflow Generator Agent (Python FastAPI)
+  # Core brain for workflow generation
+  # ========================
+  ai-workflow-agent:
+    build:
+      context: ../projects/opencode-agent
+      dockerfile: Dockerfile
+    container_name: fastgpt-ai-workflow-agent
+    ports:
+      - '8000:8000'
+    environment:
+      - APP_ENV=development
+      - LOG_LEVEL=debug
+      - FASTGPT_API_URL=${FASTGPT_API_URL:-http://host.docker.internal:3000}
+      - FASTGPT_API_KEY=${FASTGPT_API_KEY}
+      - MONGODB_URI=${MONGODB_URI:-mongodb://aiworkflow:aiworkflow123@mongo-aiworkflow:27017/aiworkflow?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:aiworkflow123@redis-aiworkflow:6379}
+      - OPENSANDBOX_URL=http://opensandbox:8080
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://165.154.97.202:38004}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen3-235B-A22B-Thinking-2507}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    env_file:
+      - .env.ai-workflow
+    volumes:
+      - ../projects/opencode-agent:/app
+    networks:
+      - ai-workflow-network
+    depends_on:
+      mongo-aiworkflow:
+        condition: service_healthy
+      redis-aiworkflow:
+        condition: service_healthy
+      opensandbox:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ========================
+  # OpenSandbox - Code Validation Service
+  # Used for testing generated plugin code
+  # NOTE: This runs in the ai-workflow-network. FastGPT app needs
+  # to access it via host.docker.internal:8081 or ensure both networks are connected
+  # ========================
+  opensandbox:
+    image: alibaba/opensandbox:latest
+    container_name: fastgpt-opensandbox
+    ports:
+      - '8081:8080'
+    environment:
+      - SANDBOX_RUNTIME=docker
+      - LOG_LEVEL=info
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================
+  # Plugin Runtime Manager
+  # Manages independent API services for plugins
+  # ========================
+  plugin-runtime:
+    build:
+      context: ../projects/plugin-runtime
+      dockerfile: Dockerfile
+    container_name: fastgpt-plugin-runtime
+    ports:
+      - '8001:8001'
+    environment:
+      - PLUGIN_RUNTIME_PORT=8001
+      - MONGODB_URI=${MONGODB_URI:-mongodb://aiworkflow:aiworkflow123@mongo-aiworkflow:27017/aiworkflow?authSource=admin}
+      - REDIS_URL=${REDIS_URL:-redis://:aiworkflow123@redis-aiworkflow:6379}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LOG_LEVEL=debug
+    env_file:
+      - .env.ai-workflow
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ai-workflow-network
+    depends_on:
+      mongo-aiworkflow:
+        condition: service_healthy
+      redis-aiworkflow:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8001/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================
+  # MongoDB for Session & Plugin Storage
+  # ========================
+  mongo-aiworkflow:
+    image: mongo:7.0
+    container_name: fastgpt-mongo-aiworkflow
+    ports:
+      - '27018:27017'
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: aiworkflow
+      MONGO_INITDB_ROOT_PASSWORD: aiworkflow123
+      MONGO_INITDB_DATABASE: aiworkflow
+    volumes:
+      - mongo-aiworkflow-data:/data/db
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ['--replSet', 'rs0', '--bind_ip_all']
+
+  # ========================
+  # Redis for Caching & Queue
+  # ========================
+  redis-aiworkflow:
+    image: redis:7-alpine
+    container_name: fastgpt-redis-aiworkflow
+    ports:
+      - '6380:6379'
+    command: redis-server --requirepass aiworkflow123
+    volumes:
+      - redis-aiworkflow-data:/data
+    networks:
+      - ai-workflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--raw', 'incr', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  ai-workflow-network:
+    driver: bridge
+
+volumes:
+  mongo-aiworkflow-data:
+  redis-aiworkflow-data:

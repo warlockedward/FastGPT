@@ -300,10 +300,11 @@ Examples:
 
 Respond ONLY with valid JSON, no other text."""
 
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
-        self.base_url = base_url or os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
-        self.api_key = api_key or os.environ.get("FASTGPT_API_KEY", "")
-        self.client = httpx.AsyncClient(timeout=30.0)
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
+        self.base_url = base_url or os.environ.get("VLLM_BASE_URL", os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000"))
+        self.api_key = api_key or os.environ.get("VLLM_API_KEY", os.environ.get("FASTGPT_API_KEY", ""))
+        self.model = model or os.environ.get("VLLM_MODEL", "Qwen3-235B-A22B-Thinking-2507")
+        self.client = httpx.AsyncClient(timeout=60.0)
         self.complexity_analyzer = ComplexityAnalyzer()
     
     async def analyze(self, message: str) -> IntentResult:
@@ -335,14 +336,14 @@ Respond ONLY with valid JSON, no other text."""
     
     async def _analyze_intent_with_llm(self, message: str) -> IntentResult:
         """Use LLM to analyze the intent"""
-        url = f"{self.base_url}/api/v1/chat/completions"
+        url = f"{self.base_url}/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": message}
