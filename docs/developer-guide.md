@@ -325,6 +325,28 @@ Returns full tool and node type information:
 }
 ```
 
+### OpenCode Agent API Endpoints (Python FastAPI)
+
+All endpoints require `X-API-Key` header for authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/ai-workflow/generate` | Generate workflow |
+| POST | `/api/ai-workflow/generate/stream` | Stream generation |
+| POST | `/api/ai-workflow/export` | Export (JSON/YAML) |
+| POST | `/api/ai-workflow/import` | Import (JSON/YAML) |
+| POST | `/api/ai-workflow/templates/save` | Save template |
+| GET | `/api/ai-workflow/templates` | List templates |
+| GET | `/api/ai-workflow/templates/{id}` | Get template |
+| DELETE | `/api/ai-workflow/templates/{id}` | Delete template |
+| POST | `/api/ai-workflow/mock-data` | Generate test data |
+| POST | `/api/ai-workflow/preview` | Preview execution |
+| POST | `/api/ai-workflow/validate` | Validate workflow |
+| POST | `/api/ai-workflow/map-variables` | Map variables |
+| GET | `/health` | Health check (no auth) |
+
+**Response includes:** `metadata` (schema_version, generated_at), `trace_id` for debugging.
+
 ## Development Workflow
 
 ### 1. TDD Approach (Required)
@@ -447,7 +469,11 @@ async def test_full_workflow():
 | `VLLM_MODEL` | Model name | `Qwen3-235B-A22B-Thinking-2507` |
 | `VLLM_API_KEY` | API key | - |
 | `FASTGPT_API_URL` | FastGPT API address | `http://fastgpt:3000` |
-| `FASTGPT_API_KEY` | FastGPT API key | - |
+|| `FASTGPT_API_KEY` | FastGPT API key | - |
+| `OPENCODE_API_KEYS` | API authentication keys (comma-separated) | - |
+| `RATE_LIMIT_MAX` | Max requests per window | 100 |
+| `RATE_LIMIT_WINDOW` | Rate limit window (seconds) | 60 |
+| `OPENCODE_DB_PATH` | SQLite database path | `/tmp/opencode_agent.db` |
 
 ## Common Issues
 
@@ -485,7 +511,41 @@ Common validation errors:
 - Use **httpx.AsyncClient** for HTTP calls
 - Use **pytest-asyncio** for async tests
 - Follow **PEP 8** for Python code
-- Use **type hints** everywhere possible
+Y|
+## Advanced Features
+
+### Circuit Breaker
+
+The system includes automatic retry with circuit breaker pattern:
+- Max 3 auto-fix attempts for validation errors
+- Falls back to human review after retries exhausted
+- Logs all retry attempts with trace_id
+
+### Internationalization (i18n)
+
+Supported languages: zh-CN, en, zh-Hant
+```python
+from api.routes import get_i18n
+message = get_i18n("status.ready", lang="en")  # "Workflow generated"
+```
+
+### Input Sanitization
+
+All user inputs are sanitized to prevent XSS/injection:
+```python
+from api.routes import sanitize_input, sanitize_workflow
+clean_text = sanitize_input(user_input)
+clean_workflow = sanitize_workflow(workflow_data)
+```
+
+### Logging
+
+Structured logging with trace_id for debugging:
+```python
+from api.routes import logger, generate_trace_id
+trace_id = generate_trace_id()
+logger.info(f"[{trace_id}] Starting workflow generation")
+```
 
 ## Resources
 
