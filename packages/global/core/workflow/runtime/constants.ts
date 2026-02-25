@@ -26,7 +26,8 @@ export enum SseResponseEventEnum {
   aiWorkflowValidationStart = 'aiWorkflowValidationStart',
   aiWorkflowValidationProgress = 'aiWorkflowValidationProgress',
   aiWorkflowMappingProgress = 'aiWorkflowMappingProgress',
-  aiWorkflowComplete = 'aiWorkflowComplete'
+  aiWorkflowComplete = 'aiWorkflowComplete',
+  aiWorkflowSession = 'aiWorkflowSession'
 }
 
 export enum DispatchNodeResponseKeyEnum {

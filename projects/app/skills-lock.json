@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "anthropics-claude-automation-recommender": {
+      "source": "smithery/ai",
+      "sourceType": "well-known",
+      "computedHash": "f4508316c7b10f4fabf649d90868b8551238ef7686c99a13c999d103a4fb88e8"
+    }
+  }
+}

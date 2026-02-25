@@ -3,6 +3,11 @@ import { NextAPI } from '@/service/middleware/entry';
 import { authUserPer } from '@fastgpt/service/support/permission/user/auth';
 import { ReadPermissionVal } from '@fastgpt/global/support/permission/constant';
 import type { ApiRequestProps } from '@fastgpt/service/type/next';
+import {
+  getSession,
+  addMessage,
+  updateWorkflowNodes
+} from '@fastgpt/service/core/workflow/ai/sessionController';
 
 async function handler(req: ApiRequestProps, res: NextApiResponse) {
   const { teamId } = await authUserPer({
@@ -18,10 +23,25 @@ async function handler(req: ApiRequestProps, res: NextApiResponse) {
     return Promise.reject('sessionId is required');
   }
 
+  // 1. Get and verify session
+  const session = await getSession(sessionId);
+  if (!session) {
+    return Promise.reject('Session not found');
+  }
+  if (session.teamId !== teamId) {
+    return Promise.reject('Permission denied');
+  }
+
   const opencodeApiUrl = process.env.OPENCODE_API_URL;
   if (!opencodeApiUrl) {
     return Promise.reject('OPENCODE_API_URL is not configured');
   }
+
+  // 2. Add user message to session
+  await addMessage(sessionId, {
+    role: 'user',
+    content: answer || (confirmed ? 'Confirmed' : 'Rejected')
+  });
 
   try {
     const response = await fetch(`${opencodeApiUrl}/api/ai-workflow/confirm`, {
@@ -43,6 +63,22 @@ async function handler(req: ApiRequestProps, res: NextApiResponse) {
     }
 
     const result = await response.json();
+
+    // 3. Update session based on result
+    if (result.workflow && result.workflow.nodes && result.workflow.edges) {
+      await updateWorkflowNodes(sessionId, {
+        nodes: result.workflow.nodes,
+        edges: result.workflow.edges
+      });
+    }
+
+    // 4. Add assistant message (if any)
+    if (result.message) {
+      await addMessage(sessionId, {
+        role: 'assistant',
+        content: result.message
+      });
+    }
 
     return {
       sessionId: result.sessionId,

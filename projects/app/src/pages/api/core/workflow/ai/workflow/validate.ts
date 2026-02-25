@@ -3,16 +3,20 @@ import { NextAPI } from '@/service/middleware/entry';
 import { authUserPer } from '@fastgpt/service/support/permission/user/auth';
 import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
 import type { ApiRequestProps } from '@fastgpt/service/type/next';
+import {
+  setWorkflowValidation,
+  getSession
+} from '@fastgpt/service/core/workflow/ai/sessionController';
 
 async function handler(req: ApiRequestProps, res: NextApiResponse) {
-  await authUserPer({
+  const { teamId } = await authUserPer({
     req,
     authToken: true,
     per: WritePermissionVal
   });
 
   const body = req.body;
-  const { workflow, plugins } = body;
+  const { workflow, plugins, sessionId } = body;
 
   const opencodeApiUrl = process.env.OPENCODE_API_URL;
   if (!opencodeApiUrl) {
@@ -38,6 +42,17 @@ async function handler(req: ApiRequestProps, res: NextApiResponse) {
     }
 
     const result = await response.json();
+
+    // If sessionId is provided, update the validation status in the session
+    if (sessionId) {
+      const session = await getSession(sessionId);
+      if (session && session.teamId === teamId) {
+        await setWorkflowValidation(sessionId, {
+          isValid: result.valid,
+          validationErrors: result.errors || []
+        });
+      }
+    }
 
     return {
       valid: result.valid,

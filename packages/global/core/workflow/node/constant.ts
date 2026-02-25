@@ -157,7 +157,8 @@ export enum FlowNodeTypeEnum {
   // child:
   appModule = 'appModule',
   pluginModule = 'pluginModule',
-  runApp = 'app'
+  runApp = 'app',
+  system = 'system'
 }
 
 // node IO value type

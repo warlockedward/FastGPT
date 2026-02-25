@@ -62,5 +62,11 @@
       "name": "pnpm",
       "version": "9.15.9"
     }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "isolated-vm",
+      "node-gyp"
+    ]
   }
 }

@@ -6,14 +6,7 @@ import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
 import { MongoApp } from '@fastgpt/service/core/app/schema';
 import { getNanoid } from '@fastgpt/global/common/string/tools';
 import type { ApiRequestProps } from '@fastgpt/service/type/next';
-
-const CreateWorkflowSchema = {
-  teamId: { type: 'string' },
-  name: { type: 'string' },
-  nodes: { type: 'array' },
-  edges: { type: 'array' },
-  folderId: { type: 'string' }
-};
+import { linkGeneratedWorkflow } from '@fastgpt/service/core/workflow/ai/sessionController';
 
 async function handler(req: ApiRequestProps) {
   const body = req.body as {
@@ -22,6 +15,7 @@ async function handler(req: ApiRequestProps) {
     nodes?: any[];
     edges?: any[];
     folderId?: string;
+    sessionId?: string;
   };
 
   const { teamId, tmbId, userId } = await authUserPer({
@@ -30,7 +24,7 @@ async function handler(req: ApiRequestProps) {
     per: TeamAppCreatePermissionVal
   });
 
-  const { name, nodes = [], edges = [], folderId } = body;
+  const { name, nodes = [], edges = [], folderId, sessionId } = body;
 
   const app = await MongoApp.create({
     teamId,
@@ -44,6 +38,14 @@ async function handler(req: ApiRequestProps) {
     intro: '',
     agentVersion: 'v2'
   });
+
+  if (sessionId) {
+    try {
+      await linkGeneratedWorkflow(sessionId, String(app._id));
+    } catch (error) {
+      console.error('Failed to link generated workflow to session', error);
+    }
+  }
 
   return {
     workflowId: String(app._id),

@@ -1,5 +1,7 @@
-import express, { Express, Request, Response } from 'express';
-import { spawn, ChildProcess } from 'child_process';
+import type { Express, Request, Response } from 'express';
+import express from 'express';
+import type { ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
