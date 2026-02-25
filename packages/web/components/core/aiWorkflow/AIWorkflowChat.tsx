@@ -17,9 +17,12 @@ import {
   AccordionItem,
   AccordionButton,
   AccordionPanel,
-  AccordionIcon
+  AccordionIcon,
+  Progress,
+  Spinner
 } from '@chakra-ui/react';
-import { sendMessage, confirmWorkflow, mapVariables, confirmMappings } from './api';
+import { sendMessage, confirmWorkflow, confirmMappings } from './api';
+import { useWorkflowStream } from './useWorkflowStream';
 
 interface Question {
   id: string;
@@ -69,7 +72,46 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([]);
   const [validationIssues, setValidationIssues] = useState<ValidationIssue[]>([]);
   const [lowConfidenceMappings, setLowConfidenceMappings] = useState<LowConfidenceMapping[]>([]);
+  const [useStreaming, setUseStreaming] = useState(true);
   const toast = useToast();
+
+  // Streaming hook
+  const {
+    workflow: streamingWorkflow,
+    progress,
+    status: streamStatus,
+    currentNode,
+    statusMessage,
+    validationIssues: streamValidationIssues,
+    lowConfidenceMappings: streamLowConfidenceMappings,
+    startStream
+  } = useWorkflowStream({
+    teamId,
+    message: input,
+    sessionId: currentSessionId,
+    onComplete: (workflow, status, issues, mappings) => {
+      setValidationIssues(issues);
+      setLowConfidenceMappings(mappings);
+
+      const assistantMessage: Message = {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: '工作流已生成',
+        workflowPreview: workflow,
+        status: status as any,
+        validation_issues: issues,
+        low_confidence_mappings: mappings
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      if (status === 'ready' && onWorkflowCreated) {
+        onWorkflowCreated(currentSessionId || '');
+      }
+    },
+    onError: (error) => {
+      toast({ title: 'Error', description: error, status: 'error', duration: 5000 });
+    }
+  });
 
   const handleSend = useCallback(
     async (messageText?: string) => {
@@ -86,8 +128,24 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
       if (!messageText) {
         setInput('');
       }
-      setIsLoading(true);
 
+      // Use streaming mode
+      if (useStreaming) {
+        try {
+          await startStream();
+        } catch (error) {
+          toast({
+            title: 'Error',
+            description: 'Failed to start streaming',
+            status: 'error',
+            duration: 3000
+          });
+        }
+        return;
+      }
+
+      // Non-streaming mode (fallback)
+      setIsLoading(true);
       try {
         const response = await sendMessage({
           teamId,
@@ -145,7 +203,16 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
         setIsLoading(false);
       }
     },
-    [input, isLoading, teamId, currentSessionId, toast, onWorkflowCreated]
+    [
+      input,
+      isLoading,
+      teamId,
+      currentSessionId,
+      toast,
+      onWorkflowCreated,
+      useStreaming,
+      startStream
+    ]
   );
 
   const handleConfirm = useCallback(
@@ -208,8 +275,32 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
     [handleSend]
   );
 
+  const isStreaming = streamStatus === 'streaming';
+
   return (
     <Flex direction="column" h="100%" maxW="800px" mx="auto" p={4}>
+      {/* Streaming Progress UI */}
+      {isStreaming && (
+        <Box mb={4} p={4} bg="blue.50" borderRadius="lg">
+          <HStack justify="space-between" mb={2}>
+            <HStack>
+              <Spinner size="sm" />
+              <Text fontWeight="bold">Generating Workflow...</Text>
+            </HStack>
+            <Badge colorScheme="blue">{progress}%</Badge>
+          </HStack>
+          <Progress value={progress} colorScheme="blue" borderRadius="full" mb={2} />
+          <Text fontSize="sm" color="gray.600">
+            {currentNode ? `Generating node: ${currentNode}` : statusMessage || 'Processing...'}
+          </Text>
+          {streamingWorkflow.nodes.length > 0 && (
+            <Text fontSize="sm" color="gray.500" mt={1}>
+              {streamingWorkflow.nodes.length} nodes, {streamingWorkflow.edges.length} edges
+            </Text>
+          )}
+        </Box>
+      )}
+
       <VStack flex={1} overflowY="auto" spacing={4} align="stretch" mb={4}>
         {messages.map((msg) => (
           <Box
@@ -245,7 +336,7 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
           </Box>
         ))}
 
-        {(validationIssues.length > 0 || lowConfidenceMappings.length > 0) && !isLoading && (
+        {(validationIssues.length > 0 || lowConfidenceMappings.length > 0) && !isStreaming && (
           <Accordion allowMultiple>
             <AccordionItem>
               <AccordionButton>
@@ -305,7 +396,7 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
           </Accordion>
         )}
 
-        {pendingQuestions.length > 0 && !isLoading && (
+        {pendingQuestions.length > 0 && !isStreaming && (
           <Box p={4} borderRadius="lg" bg="orange.50" alignSelf="flex-start" maxW="80%">
             <Text fontWeight="bold" mb={2}>
               Please answer:
@@ -356,7 +447,7 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
             </HStack>
           </Box>
         )}
-        {isLoading && (
+        {isLoading && !isStreaming && (
           <Box p={4} borderRadius="lg" bg="gray.50" alignSelf="flex-start">
             <Text color="gray.500">Thinking...</Text>
           </Box>
@@ -369,15 +460,15 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
           onChange={(e) => setInput(e.target.value)}
           placeholder="Describe the workflow you want to create..."
           onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
-          disabled={isLoading}
+          disabled={isLoading || isStreaming}
         />
         <Button
           onClick={() => handleSend()}
           colorScheme="blue"
-          isLoading={isLoading}
+          isLoading={isLoading || isStreaming}
           isDisabled={!input.trim()}
         >
-          Send
+          {isStreaming ? 'Generating...' : 'Send'}
         </Button>
       </Flex>
     </Flex>

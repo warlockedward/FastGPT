@@ -2,47 +2,49 @@ import { FlowNodeInputTypeEnum } from '../node/constant';
 
 export enum SseResponseEventEnum {
   error = 'error',
-  workflowDuration = 'workflowDuration', // workflow duration
-  answer = 'answer', // animation stream
-  fastAnswer = 'fastAnswer', // direct answer text, not animation
-  flowNodeStatus = 'flowNodeStatus', // update node status
-  flowNodeResponse = 'flowNodeResponse', // node response
-
-  toolCall = 'toolCall', // tool start
-  toolParams = 'toolParams', // tool params return
-  toolResponse = 'toolResponse', // tool response return
-
-  flowResponses = 'flowResponses', // sse response request
+  workflowDuration = 'workflowDuration',
+  answer = 'answer',
+  fastAnswer = 'fastAnswer',
+  flowNodeStatus = 'flowNodeStatus',
+  flowNodeResponse = 'flowNodeResponse',
+  toolCall = 'toolCall',
+  toolParams = 'toolParams',
+  toolResponse = 'toolResponse',
+  flowResponses = 'flowResponses',
   updateVariables = 'updateVariables',
-
   interactive = 'interactive',
+  plan = 'plan',
+  stepTitle = 'stepTitle',
+  collectionForm = 'collectionForm',
+  topAgentConfig = 'topAgentConfig',
 
-  // Agent
-  plan = 'plan', // plan response
-  stepTitle = 'stepTitle', // step title response
-
-  // Helperbot
-  collectionForm = 'collectionForm', // collection form for HelperBot
-  topAgentConfig = 'topAgentConfig' // form data for TopAgent
+  // AI Workflow streaming events
+  aiWorkflowIntent = 'aiWorkflowIntent',
+  aiWorkflowNodeGenerating = 'aiWorkflowNodeGenerating',
+  aiWorkflowNodeGenerated = 'aiWorkflowNodeGenerated',
+  aiWorkflowEdgeCreated = 'aiWorkflowEdgeCreated',
+  aiWorkflowValidationStart = 'aiWorkflowValidationStart',
+  aiWorkflowValidationProgress = 'aiWorkflowValidationProgress',
+  aiWorkflowMappingProgress = 'aiWorkflowMappingProgress',
+  aiWorkflowComplete = 'aiWorkflowComplete'
 }
 
 export enum DispatchNodeResponseKeyEnum {
-  answerText = 'answerText', // answer text
-  reasoningText = 'reasoningText', // reasoning text
-
-  skipHandleId = 'skipHandleId', // skip handle id
-  nodeResponse = 'responseData', // run node response
-  nodeResponses = 'nodeResponses', // node responses
-  nodeDispatchUsages = 'nodeDispatchUsages', // the node bill.
-  childrenResponses = 'childrenResponses', // Some nodes make recursive calls that need to be returned
-  toolResponses = 'toolResponses', // The result is passed back to the tool node for use
-  assistantResponses = 'assistantResponses', // assistant response
-  rewriteHistories = 'rewriteHistories', // If have the response, workflow histories will be rewrite
-  interactive = 'INTERACTIVE', // is interactive
-  runTimes = 'runTimes', // run times
-  newVariables = 'newVariables', // new variables
-  memories = 'system_memories', // memories
-  customFeedbacks = 'customFeedbacks' // custom feedbacks
+  answerText = 'answerText',
+  reasoningText = 'reasoningText',
+  skipHandleId = 'skipHandleId',
+  nodeResponse = 'responseData',
+  nodeResponses = 'nodeResponses',
+  nodeDispatchUsages = 'nodeDispatchUsages',
+  childrenResponses = 'childrenResponses',
+  toolResponses = 'toolResponses',
+  assistantResponses = 'assistantResponses',
+  rewriteHistories = 'rewriteHistories',
+  interactive = 'INTERACTIVE',
+  runTimes = 'runTimes',
+  newVariables = 'newVariables',
+  memories = 'system_memories',
+  customFeedbacks = 'customFeedbacks'
 }
 
 export const needReplaceReferenceInputTypeList = [
@@ -52,5 +54,4 @@ export const needReplaceReferenceInputTypeList = [
   FlowNodeInputTypeEnum.custom
 ] as string[];
 
-// Interactive
 export const ConfirmPlanAgentText = 'CONFIRM';

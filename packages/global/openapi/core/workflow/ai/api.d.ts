@@ -5,6 +5,7 @@ export const AiChatRequestSchema = z.object({
   message: z.string(),
   sessionId: z.string().optional(),
   attachments: z.array(z.string()).optional(),
+  stream: z.boolean().optional(),
   context: z
     .object({
       workflowId: z.string().optional(),

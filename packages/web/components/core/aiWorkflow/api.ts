@@ -5,6 +5,20 @@ export const sendMessage = (data: {
   message: string;
   sessionId?: string;
   attachments?: string[];
+  stream?: boolean;
+  context?: {
+    workflowId?: string;
+    mode?: 'create' | 'optimize' | 'extend';
+  };
+}) => {
+  return request.post('/core/workflow/ai/chat', data);
+};
+
+export const sendMessage = (data: {
+  teamId: string;
+  message: string;
+  sessionId?: string;
+  attachments?: string[];
   context?: {
     workflowId?: string;
     mode?: 'create' | 'optimize' | 'extend';
