@@ -1,5 +1,5 @@
 """
-RAG Knowledge Base - Workflow case storage and retrieval
+RAG Knowledge Base - Workflow case storage and retrieval using Milvus
 """
 
 import os
@@ -13,19 +13,15 @@ import httpx
 
 
 class CaseStatus(str, Enum):
-    """Workflow case status"""
-
     SUCCESS = "success"
     FAILED = "failed"
     PARTIAL = "partial"
 
 
 class WorkflowCase(BaseModel):
-    """A workflow case for RAG"""
-
     id: str
     intent: str
-    topology: List[str]  # Node type sequence
+    topology: List[str]
     nodes_count: int
     edges_count: int
     key_prompts: str
@@ -34,68 +30,73 @@ class WorkflowCase(BaseModel):
     status: CaseStatus
     created_at: str
     updated_at: str
-
-    # For embedding
     embedding: Optional[List[float]] = None
 
 
 class RetrievalResult(BaseModel):
-    """Result of case retrieval"""
-
     cases: List[WorkflowCase]
     total: int
     query_embedding: Optional[List[float]] = None
 
 
 class RAGKnowledgeBase:
-    """RAG Knowledge Base for workflow cases"""
-
     def __init__(
-        self, vector_store_url: Optional[str] = None, db_url: Optional[str] = None
+        self,
+        milvus_url: Optional[str] = None,
+        milvus_token: Optional[str] = None,
+        db_url: Optional[str] = None,
     ):
-        self.vector_store_url = vector_store_url or os.environ.get(
-            "VECTOR_STORE_URL", "http://localhost:6333"
+        self.milvus_url = milvus_url or os.environ.get(
+            "MILVUS_URL", "http://localhost:19530"
         )
+        self.milvus_token = milvus_token or os.environ.get("MILVUS_TOKEN", "")
+        self.collection_name = "workflow_cases"
         self.db_url = db_url or os.environ.get(
             "MONGODB_URI", "mongodb://localhost:27017"
         )
         self.client = httpx.AsyncClient(timeout=30.0)
-        self._local_cache = []  # In-memory cache for development
+        self._local_cache = []
 
     async def close(self):
         await self.client.aclose()
 
     def _generate_id(self, intent: str) -> str:
-        """Generate unique ID for a case"""
         return hashlib.md5(
             f"{intent}_{datetime.now().isoformat()}".encode()
         ).hexdigest()[:12]
 
     def _extract_topology(self, nodes: List[Dict], edges: List[Dict]) -> List[str]:
-        """Extract node topology from workflow"""
         topology = []
-
-        # Get node types in order (by position x)
         sorted_nodes = sorted(nodes, key=lambda n: n.get("position", {}).get("x", 0))
         for node in sorted_nodes:
             node_type = node.get("flowNodeType", "unknown")
             topology.append(node_type)
-
         return topology
 
     def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text (simplified - in production use actual embedding model)"""
-        # Simple hash-based embedding for development
-        # In production, replace with actual embedding API call
         hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
-
-        # Generate a fixed-size vector
-        dim = 384  # Common embedding dimension
+        dim = 768
         embedding = []
         for i in range(dim):
             embedding.append(((hash_val >> i) % 1000) / 1000.0)
-
         return embedding
+
+    async def _ensure_collection(self):
+        try:
+            response = await self.client.post(
+                f"{self.milvus_url}/api/v1/collection",
+                json={
+                    "collection_name": self.collection_name,
+                    "dimension": 768,
+                    "metric_type": "IP",
+                    "description": "Workflow cases for RAG",
+                },
+                headers={"Authorization": f"Bearer {self.milvus_token}"}
+                if self.milvus_token
+                else {},
+            )
+        except Exception:
+            pass
 
     async def store_case(
         self,
@@ -107,8 +108,6 @@ class RAGKnowledgeBase:
         tags: List[str],
         status: CaseStatus,
     ) -> WorkflowCase:
-        """Store a workflow case"""
-
         topology = self._extract_topology(nodes, edges)
 
         case = WorkflowCase(
@@ -126,39 +125,57 @@ class RAGKnowledgeBase:
             embedding=self._generate_embedding(intent),
         )
 
-        # Store locally for now (in production, store to vector DB)
         self._local_cache.append(case.model_dump())
 
-        # Try to store in vector DB
         try:
-            await self._store_in_vector_db(case)
+            await self._store_in_milvus(case)
         except Exception:
-            pass  # Continue with local cache if vector DB unavailable
+            pass
 
         return case
 
-    async def _store_in_vector_db(self, case: WorkflowCase):
-        """Store case in vector database (Qdrant)"""
+    async def _store_in_milvus(self, case: WorkflowCase):
         if case.embedding is None:
             return
 
-        await self.client.post(
-            f"{self.vector_store_url}/collections/workflow_cases/points",
-            json={
-                "points": [
+        try:
+            await self.client.insert(
+                collection_name=self.collection_name,
+                records=[
                     {
-                        "id": int(case.id, 16),
+                        "id": case.id,
                         "vector": case.embedding,
-                        "payload": {
+                        "intent": case.intent,
+                        "topology": json.dumps(case.topology),
+                        "status": case.status.value,
+                        "version": case.version,
+                        "tags": json.dumps(case.tags),
+                    }
+                ],
+                headers={"Authorization": f"Bearer {self.milvus_token}"}
+                if self.milvus_token
+                else {},
+            )
+        except Exception as e:
+            if "collection" in str(e).lower():
+                await self._ensure_collection()
+                await self.client.insert(
+                    collection_name=self.collection_name,
+                    records=[
+                        {
+                            "id": case.id,
+                            "vector": case.embedding,
                             "intent": case.intent,
                             "topology": json.dumps(case.topology),
                             "status": case.status.value,
                             "version": case.version,
-                        },
-                    }
-                ]
-            },
-        )
+                            "tags": json.dumps(case.tags),
+                        }
+                    ],
+                    headers={"Authorization": f"Bearer {self.milvus_token}"}
+                    if self.milvus_token
+                    else {},
+                )
 
     async def retrieve_similar(
         self,
@@ -167,13 +184,10 @@ class RAGKnowledgeBase:
         status_filter: Optional[CaseStatus] = None,
         version: Optional[str] = None,
     ) -> RetrievalResult:
-        """Retrieve similar workflow cases"""
-
         query_embedding = self._generate_embedding(query)
 
-        # Try vector DB search first
         try:
-            cases = await self._retrieve_from_vector_db(
+            cases = await self._retrieve_from_milvus(
                 query_embedding, limit, status_filter, version
             )
             if cases:
@@ -183,63 +197,61 @@ class RAGKnowledgeBase:
         except Exception:
             pass
 
-        # Fallback to local cache with simple matching
         cases = self._retrieve_from_cache(query, limit, status_filter, version)
 
         return RetrievalResult(
             cases=cases, total=len(cases), query_embedding=query_embedding
         )
 
-    async def _retrieve_from_vector_db(
+    async def _retrieve_from_milvus(
         self,
         query_embedding: List[float],
         limit: int,
         status_filter: Optional[CaseStatus],
         version: Optional[str],
     ) -> List[WorkflowCase]:
-        """Retrieve from vector database"""
-
-        # Build filter
-        filter_conditions = {}
+        filter_expr = "1==1"
         if status_filter:
-            filter_conditions["status"] = status_filter.value
+            filter_expr = f'status == "{status_filter.value}"'
         if version:
-            filter_conditions["version"] = version
+            filter_expr += f' and version == "{version}"'
 
-        response = await self.client.post(
-            f"{self.vector_store_url}/collections/workflow_cases/points/search",
-            json={
-                "vector": query_embedding,
-                "limit": limit,
-                "filter": filter_conditions if filter_conditions else None,
-            },
-        )
-
-        if response.status_code != 200:
-            return []
-
-        results = response.json().get("result", [])
-
-        cases = []
-        for r in results:
-            payload = r.get("payload", {})
-            cases.append(
-                WorkflowCase(
-                    id=str(r.get("id")),
-                    intent=payload.get("intent", ""),
-                    topology=json.loads(payload.get("topology", "[]")),
-                    nodes_count=0,
-                    edges_count=0,
-                    key_prompts="",
-                    version=payload.get("version", ""),
-                    tags=[],
-                    status=CaseStatus(payload.get("status", "success")),
-                    created_at="",
-                    updated_at="",
-                )
+        try:
+            response = await self.client.search(
+                collection_name=self.collection_name,
+                vector=query_embedding,
+                limit=limit,
+                filter=filter_expr,
+                output_fields=["id", "intent", "topology", "status", "version", "tags"],
+                headers={"Authorization": f"Bearer {self.milvus_token}"}
+                if self.milvus_token
+                else {},
             )
 
-        return cases
+            results = response.get("results", [])
+
+            cases = []
+            for r in results:
+                fields = r.get("entity", {})
+                cases.append(
+                    WorkflowCase(
+                        id=fields.get("id", ""),
+                        intent=fields.get("intent", ""),
+                        topology=json.loads(fields.get("topology", "[]")),
+                        nodes_count=0,
+                        edges_count=0,
+                        key_prompts="",
+                        version=fields.get("version", ""),
+                        tags=json.loads(fields.get("tags", "[]")),
+                        status=CaseStatus(fields.get("status", "success")),
+                        created_at="",
+                        updated_at="",
+                    )
+                )
+
+            return cases
+        except Exception as e:
+            raise Exception(f"Milvus search failed: {str(e)}")
 
     def _retrieve_from_cache(
         self,
@@ -248,35 +260,28 @@ class RAGKnowledgeBase:
         status_filter: Optional[CaseStatus],
         version: Optional[str],
     ) -> List[WorkflowCase]:
-        """Retrieve from local cache using simple text matching"""
-
         query_lower = query.lower()
         results = []
 
         for case_dict in self._local_cache:
-            # Apply filters
             if status_filter and case_dict.get("status") != status_filter.value:
                 continue
             if version and case_dict.get("version") != version:
                 continue
 
-            # Simple text matching
             if query_lower in case_dict.get("intent", "").lower():
                 results.append(WorkflowCase(**case_dict))
 
-            # Also check tags
             for tag in case_dict.get("tags", []):
                 if query_lower in tag.lower():
                     results.append(WorkflowCase(**case_dict))
                     break
 
-        # Sort by relevance (simple - just return first N)
         return results[:limit]
 
     async def retrieve_positive_cases(
         self, query: str, limit: int = 3
     ) -> RetrievalResult:
-        """Retrieve successful cases for reference"""
         return await self.retrieve_similar(
             query, limit, status_filter=CaseStatus.SUCCESS
         )
@@ -284,7 +289,6 @@ class RAGKnowledgeBase:
     async def retrieve_negative_cases(
         self, query: str, limit: int = 3
     ) -> RetrievalResult:
-        """Retrieve failed cases as warnings"""
         return await self.retrieve_similar(
             query, limit, status_filter=CaseStatus.FAILED
         )
@@ -292,8 +296,6 @@ class RAGKnowledgeBase:
     async def get_system_prompt_context(
         self, query: str, include_positive: bool = True, include_negative: bool = True
     ) -> str:
-        """Generate system prompt context from retrieved cases"""
-
         context_parts = []
 
         if include_positive:
@@ -324,30 +326,14 @@ class RAGKnowledgeBase:
     async def record_feedback(
         self, case_id: str, was_modified: bool, error_log: Optional[str] = None
     ) -> bool:
-        """Record user feedback for a generated workflow"""
-
-        # Find case in cache
         for case_dict in self._local_cache:
             if case_dict.get("id") == case_id:
-                # Update status based on feedback
                 if was_modified:
                     case_dict["status"] = CaseStatus.PARTIAL.value
                 if error_log:
                     case_dict["key_prompts"] += f"\n[ERROR]: {error_log}"
 
                 case_dict["updated_at"] = datetime.now().isoformat()
-
-                # Try to update in vector DB
-                try:
-                    await self._update_in_vector_db(case_dict)
-                except Exception:
-                    pass
-
                 return True
 
         return False
-
-    async def _update_in_vector_db(self, case_dict: Dict):
-        """Update case in vector database"""
-        # Implementation would update the vector DB entry
-        pass

@@ -79,3 +79,34 @@ export const validateWorkflow = (data: {
 }) => {
   return request.post('/core/workflow/ai/workflow/validate', data);
 };
+
+export const mapVariables = (data: {
+  workflow: {
+    nodes: any[];
+    edges: any[];
+  };
+}) => {
+  return request.post('/api/ai-workflow/map-variables', data);
+};
+
+export const getWorkflowState = (sessionId: string) => {
+  return request.get(`/api/ai-workflow/state/${sessionId}`);
+};
+
+export const confirmMappings = (
+  sessionId: string,
+  mappings: Array<{
+    source_node_id: string;
+    target_node_id: string;
+  }>
+) => {
+  return request.post(`/api/ai-workflow/state/${sessionId}/confirm-mappings`, mappings);
+};
+
+export const recordFeedback = (data: {
+  case_id?: string;
+  was_modified: boolean;
+  error_log?: string;
+}) => {
+  return request.post('/api/ai-workflow/feedback', data);
+};

@@ -33,8 +33,28 @@ export const AiChatResponseSchema = z.object({
       edges: z.any()
     })
     .optional(),
-  status: z.enum(['ready', 'need_more_info', 'failed', 'generating']).optional(),
-  questions: z.array(QuestionSchema).optional()
+  status: z.enum(['ready', 'need_more_info', 'failed', 'generating', 'reviewing']).optional(),
+  questions: z.array(QuestionSchema).optional(),
+  validation_issues: z
+    .array(
+      z.object({
+        message: z.string(),
+        severity: z.string(),
+        level: z.string().optional()
+      })
+    )
+    .optional(),
+  low_confidence_mappings: z
+    .array(
+      z.object({
+        source_node_id: z.string(),
+        source_variable: z.string(),
+        target_node_id: z.string(),
+        target_variable: z.string(),
+        confidence: z.number()
+      })
+    )
+    .optional()
 });
 
 export type AiChatResponseType = z.infer<typeof AiChatResponseSchema>;
@@ -66,8 +86,23 @@ export type WorkflowValidateRequestType = z.infer<typeof WorkflowValidateRequest
 
 export const WorkflowValidateResponseSchema = z.object({
   valid: z.boolean(),
-  errors: z.array(z.string()),
-  suggestions: z.array(z.string()).optional()
+  errors: z.array(
+    z.object({
+      message: z.string(),
+      severity: z.string(),
+      level: z.string().optional()
+    })
+  ),
+  warnings: z
+    .array(
+      z.object({
+        message: z.string(),
+        severity: z.string(),
+        level: z.string().optional()
+      })
+    )
+    .optional(),
+  passed_levels: z.array(z.string()).optional()
 });
 
 export type WorkflowValidateResponseType = z.infer<typeof WorkflowValidateResponseSchema>;

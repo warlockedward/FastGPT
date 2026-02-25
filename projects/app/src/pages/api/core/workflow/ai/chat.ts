@@ -8,7 +8,6 @@ import type {
 } from '@fastgpt/global/openapi/core/workflow/ai/api';
 import { getSystemToolsWithInstalled } from '@fastgpt/service/core/app/tool/controller';
 
-// Fetch full tool/node data from the nodes API
 async function getWorkflowTools(req: NextApiRequest, teamId: string, isRoot: boolean) {
   const baseUrl = process.env.FASTGPT_API_URL || 'http://localhost:3000';
   try {
@@ -22,7 +21,6 @@ async function getWorkflowTools(req: NextApiRequest, teamId: string, isRoot: boo
     }
     return await response.json();
   } catch (error) {
-    // Fallback to direct fetch if API call fails
     const tools = await getSystemToolsWithInstalled({ teamId, isRoot });
     return {
       tools: tools.map((tool: any) => ({
@@ -54,11 +52,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiCha
     return Promise.reject('OPENCODE_API_URL is not configured');
   }
 
-  // Get full workflow tools and node types
   const workflowData = await getWorkflowTools(req, teamId, isRoot);
   const { tools, nodeTypes, categories } = workflowData;
 
-  // Filter installed plugins with full details
   const availablePlugins = tools
     .filter((tool: any) => tool.installed)
     .map((tool: any) => ({
@@ -88,9 +84,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiCha
         sessionId,
         context: {
           existingWorkflow: context?.workflowId,
-          // Pass full tool details instead of just names
           availablePlugins: availablePlugins,
-          // Also include node types and categories for workflow generation
           nodeTypes: nodeTypes,
           categories: categories,
           enterpriseSystems: []
@@ -120,7 +114,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse): Promise<AiCha
           }
         : undefined,
       status: result.status,
-      questions: result.questions
+      questions: result.questions,
+      validation_issues: result.validation_issues,
+      low_confidence_mappings: result.low_confidence_mappings
     };
   } catch (error) {
     return Promise.reject(`Failed to connect to OpenCode API: ${error}`);

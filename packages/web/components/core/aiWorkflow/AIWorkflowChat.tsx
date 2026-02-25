@@ -12,14 +12,33 @@ import {
   HStack,
   Badge,
   Alert,
-  AlertIcon
+  AlertIcon,
+  Accordion,
+  AccordionItem,
+  AccordionButton,
+  AccordionPanel,
+  AccordionIcon
 } from '@chakra-ui/react';
-import { sendMessage, confirmWorkflow } from './api';
+import { sendMessage, confirmWorkflow, mapVariables, confirmMappings } from './api';
 
 interface Question {
   id: string;
   question: string;
   options?: string[];
+}
+
+interface ValidationIssue {
+  message: string;
+  severity: string;
+  level?: string;
+}
+
+interface LowConfidenceMapping {
+  source_node_id: string;
+  source_variable: string;
+  target_node_id: string;
+  target_variable: string;
+  confidence: number;
 }
 
 interface Message {
@@ -30,9 +49,10 @@ interface Message {
     nodes: any[];
     edges: any[];
   };
-  status?: 'ready' | 'need_more_info' | 'failed' | 'generating';
+  status?: 'ready' | 'need_more_info' | 'failed' | 'generating' | 'reviewing';
   questions?: Question[];
-  nextQuestion?: string;
+  validation_issues?: ValidationIssue[];
+  low_confidence_mappings?: LowConfidenceMapping[];
 }
 
 interface AIWorkflowChatProps {
@@ -47,6 +67,8 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
   const [isLoading, setIsLoading] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState(sessionId);
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([]);
+  const [validationIssues, setValidationIssues] = useState<ValidationIssue[]>([]);
+  const [lowConfidenceMappings, setLowConfidenceMappings] = useState<LowConfidenceMapping[]>([]);
   const toast = useToast();
 
   const handleSend = useCallback(
@@ -76,13 +98,18 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
         const newSessionId = response.sessionId || currentSessionId;
         setCurrentSessionId(newSessionId);
 
+        setValidationIssues(response.validation_issues || []);
+        setLowConfidenceMappings(response.low_confidence_mappings || []);
+
         const assistantMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
           content: response.message,
           workflowPreview: response.workflowPreview,
           status: response.status,
-          questions: response.questions
+          questions: response.questions,
+          validation_issues: response.validation_issues,
+          low_confidence_mappings: response.low_confidence_mappings
         };
 
         setMessages((prev) => [...prev, assistantMessage]);
@@ -93,6 +120,19 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
 
         if (response.workflowPreview && response.status === 'ready' && onWorkflowCreated) {
           onWorkflowCreated(newSessionId);
+        }
+
+        if (
+          response.status === 'reviewing' &&
+          response.low_confidence_mappings &&
+          response.low_confidence_mappings.length > 0
+        ) {
+          toast({
+            title: 'Review Required',
+            description: `${response.low_confidence_mappings.length} variable mappings need your confirmation`,
+            status: 'warning',
+            duration: 5000
+          });
         }
       } catch (error) {
         toast({
@@ -114,8 +154,20 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
 
       setIsLoading(true);
       setPendingQuestions([]);
+      setValidationIssues([]);
+      setLowConfidenceMappings([]);
 
       try {
+        if (confirmed && lowConfidenceMappings.length > 0 && currentSessionId) {
+          await confirmMappings(
+            currentSessionId,
+            lowConfidenceMappings.map((m) => ({
+              source_node_id: m.source_node_id,
+              target_node_id: m.target_node_id
+            }))
+          );
+        }
+
         const response = await confirmWorkflow({
           sessionId: currentSessionId,
           answer: answer || '',
@@ -127,8 +179,7 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
           role: 'assistant',
           content: response.message || response.nextQuestion || '',
           workflowPreview: response.workflow || response.workflowPreview,
-          status: response.status,
-          questions: response.questions
+          status: response.status
         };
 
         setMessages((prev) => [...prev, assistantMessage]);
@@ -147,7 +198,7 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
         setIsLoading(false);
       }
     },
-    [currentSessionId, isLoading, toast, onWorkflowCreated]
+    [currentSessionId, isLoading, lowConfidenceMappings, toast, onWorkflowCreated]
   );
 
   const handleOptionClick = useCallback(
@@ -179,6 +230,12 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
                 </Text>
               </Box>
             )}
+            {msg.status === 'reviewing' && (
+              <Alert status="warning" mt={2} borderRadius="md">
+                <AlertIcon />
+                Please review the variable mappings and validation issues below.
+              </Alert>
+            )}
             {msg.status === 'failed' && (
               <Alert status="error" mt={2} borderRadius="md">
                 <AlertIcon />
@@ -187,6 +244,67 @@ export function AIWorkflowChat({ teamId, sessionId, onWorkflowCreated }: AIWorkf
             )}
           </Box>
         ))}
+
+        {(validationIssues.length > 0 || lowConfidenceMappings.length > 0) && !isLoading && (
+          <Accordion allowMultiple>
+            <AccordionItem>
+              <AccordionButton>
+                <Box flex="1" textAlign="left">
+                  <Text fontWeight="bold">Validation Issues ({validationIssues.length})</Text>
+                </Box>
+                <AccordionIcon />
+              </AccordionButton>
+              <AccordionPanel pb={4}>
+                {validationIssues.map((issue, idx) => (
+                  <Alert
+                    key={idx}
+                    status={issue.severity === 'error' ? 'error' : 'warning'}
+                    mb={2}
+                    borderRadius="md"
+                  >
+                    <AlertIcon />
+                    <Text fontSize="sm">{issue.message}</Text>
+                  </Alert>
+                ))}
+              </AccordionPanel>
+            </AccordionItem>
+
+            <AccordionItem>
+              <AccordionButton>
+                <Box flex="1" textAlign="left">
+                  <Text fontWeight="bold">Variable Mappings ({lowConfidenceMappings.length})</Text>
+                </Box>
+                <AccordionIcon />
+              </AccordionButton>
+              <AccordionPanel pb={4}>
+                {lowConfidenceMappings.map((mapping, idx) => (
+                  <Box key={idx} p={2} bg="orange.50" mb={2} borderRadius="md">
+                    <HStack justify="space-between">
+                      <Text fontSize="sm">
+                        {mapping.source_variable} → {mapping.target_variable}
+                      </Text>
+                      <Badge colorScheme="orange">{Math.round(mapping.confidence * 100)}%</Badge>
+                    </HStack>
+                  </Box>
+                ))}
+                <HStack mt={3}>
+                  <Button size="sm" colorScheme="green" onClick={() => handleConfirm(true)}>
+                    Confirm All
+                  </Button>
+                  <Button
+                    size="sm"
+                    colorScheme="red"
+                    variant="outline"
+                    onClick={() => handleConfirm(false)}
+                  >
+                    Cancel
+                  </Button>
+                </HStack>
+              </AccordionPanel>
+            </AccordionItem>
+          </Accordion>
+        )}
+
         {pendingQuestions.length > 0 && !isLoading && (
           <Box p={4} borderRadius="lg" bg="orange.50" alignSelf="flex-start" maxW="80%">
             <Text fontWeight="bold" mb={2}>
