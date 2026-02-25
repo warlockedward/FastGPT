@@ -186,8 +186,173 @@ class StaticValidator:
                 )
             )
 
-        # 8. Type compatibility check (basic)
-        # This is handled more thoroughly by VariableMappingEngine
+        # 9. Enhanced validation: Circular dependency detection
+        issues.extend(self._check_circular_dependencies(nodes, edges))
+        
+        # 10. Enhanced validation: Node naming conventions
+        issues.extend(self._check_naming_conventions(nodes))
+        
+        # 11. Enhanced validation: Required config for specific node types
+        issues.extend(self._check_required_config(nodes))
+        
+        # 12. Enhanced validation: Performance warnings
+        issues.extend(self._check_performance(nodes, edges))
+        
+        return issues
+
+    def _check_circular_dependencies(self, nodes: List[Dict], edges: List[Dict]) -> List[ValidationIssue]:
+        """Check for circular dependencies in workflow"""
+        issues = []
+        node_map = {n.get("nodeId"): n for n in nodes}
+        
+        # Build adjacency list
+        adj = {n.get("nodeId"): [] for n in nodes}
+        for e in edges:
+            src, tgt = e.get("source"), e.get("target")
+            if src in adj and tgt in adj:
+                adj[src].append(tgt)
+        
+        # DFS to detect cycles
+        visited = set()
+        rec_stack = set()
+        
+        def has_cycle(node, path):
+            visited.add(node)
+            rec_stack.add(node)
+            for neighbor in adj.get(node, []):
+                if neighbor not in visited:
+                    if has_cycle(neighbor, path + [neighbor]):
+                        return True
+                elif neighbor in rec_stack:
+                    issues.append(ValidationIssue(
+                        level=ValidationLevel.STATIC,
+                        severity=ValidationSeverity.ERROR,
+                        message=f"Circular dependency detected: {' -> '.join(path + [neighbor])}",
+                        suggestion="Remove the circular reference"
+                    ))
+                    return True
+            rec_stack.remove(node)
+            return False
+        
+        for node in adj:
+            if node not in visited:
+                has_cycle([node])
+        
+        return issues
+
+    def _check_naming_conventions(self, nodes: List[Dict]) -> List[ValidationIssue]:
+        """Check node naming conventions"""
+        issues = []
+        for node in nodes:
+            name = node.get("name", "")
+            if len(name) > 50:
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.STATIC,
+                    severity=ValidationSeverity.WARNING,
+                    message=f"Node name too long: '{name[:20]}...'",
+                    node_id=node.get("nodeId"),
+                    suggestion="Keep node names under 50 characters"
+                ))
+            if not name or name.isspace():
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.STATIC,
+                    severity=ValidationSeverity.WARNING,
+                    message="Node has empty name",
+                    node_id=node.get("nodeId"),
+                    suggestion="Add a descriptive name"
+                ))
+        return issues
+
+    def _check_required_config(self, nodes: List[Dict]) -> List[ValidationIssue]:
+        """Check required configuration for specific node types"""
+        issues = []
+        for node in nodes:
+            node_type = node.get("flowNodeType")
+            node_id = node.get("nodeId")
+            config = node.get("data", {})
+            
+            if node_type == "chatNode" and not config.get("model"):
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.STATIC,
+                    severity=ValidationSeverity.ERROR,
+                    message="chatNode missing model configuration",
+                    node_id=node_id,
+                    suggestion="Configure the AI model"
+                ))
+            elif node_type == "datasetSearchNode" and not config.get("datasetId"):
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.STATIC,
+                    severity=ValidationSeverity.ERROR,
+                    message="datasetSearchNode missing datasetId",
+                    node_id=node_id,
+                    suggestion="Select a knowledge base"
+                ))
+            elif node_type == "httpRequest468" and not config.get("url"):
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.STATIC,
+                    severity=ValidationSeverity.ERROR,
+                    message="httpRequest node missing URL",
+                    node_id=node_id,
+                    suggestion="Configure the HTTP endpoint URL"
+                ))
+        return issues
+
+    def _check_performance(self, nodes: List[Dict], edges: List[Dict]) -> List[ValidationIssue]:
+        """Check for potential performance issues"""
+        issues = []
+        
+        # Too many nodes
+        if len(nodes) > 50:
+            issues.append(ValidationIssue(
+                level=ValidationLevel.STATIC,
+                severity=ValidationSeverity.WARNING,
+                message=f"Workflow has {len(nodes)} nodes - may impact performance",
+                suggestion="Consider splitting into sub-workflows"
+            ))
+        
+        # Too many edges
+        if len(edges) > 100:
+            issues.append(ValidationIssue(
+                level=ValidationLevel.STATIC,
+                severity=ValidationSeverity.WARNING,
+                message=f"Workflow has {len(edges)} edges - may impact performance",
+                suggestion="Simplify the workflow structure"
+            ))
+        
+        # Deep nesting check (more than 10 levels)
+        node_map = {n.get("nodeId"): n for n in nodes}
+        max_depth = self._calculate_depth(edges, node_map)
+        if max_depth > 10:
+            issues.append(ValidationIssue(
+                level=ValidationLevel.STATIC,
+                severity=ValidationSeverity.WARNING,
+                message=f"Workflow depth is {max_depth} levels - may cause performance issues",
+                suggestion="Consider flattening the workflow"
+            ))
+        
+        return issues
+
+    def _calculate_depth(self, edges: List[Dict], node_map: Dict) -> int:
+        """Calculate maximum workflow depth"""
+        # Build adjacency list
+        adj = {}
+        for e in edges:
+            src, tgt = e.get("source"), e.get("target")
+            adj.setdefault(src, []).append(tgt)
+        
+        # Find start nodes
+        targets = set(e.get("target") for e in edges)
+        starts = [n for n in adj if n not in targets]
+        
+        def get_depth(node, visited=None):
+            if visited is None: visited = set()
+            if node in visited: return 0
+            visited.add(node)
+            children = adj.get(node, [])
+            if not children: return 1
+            return 1 + max(get_depth(c, visited.copy()) for c in children)
+        
+        return max(get_depth(s) for s in starts) if starts else 0
 
         return issues
 

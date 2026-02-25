@@ -24,6 +24,13 @@ export const QuestionSchema = z.object({
 
 export type QuestionType = z.infer<typeof QuestionSchema>;
 
+export const WorkflowMetadataSchema = z.object({
+  schema_version: z.string().optional(),
+  generated_at: z.string().optional(),
+  fastgpt_version: z.string().optional(),
+  generator_version: z.string().optional()
+});
+
 export const AiChatResponseSchema = z.object({
   sessionId: z.string(),
   message: z.string(),
@@ -31,7 +38,8 @@ export const AiChatResponseSchema = z.object({
   workflowPreview: z
     .object({
       nodes: z.any(),
-      edges: z.any()
+      edges: z.any(),
+      metadata: WorkflowMetadataSchema.optional()
     })
     .optional(),
   status: z.enum(['ready', 'need_more_info', 'failed', 'generating', 'reviewing']).optional(),

@@ -40,6 +40,7 @@ class WorkflowState(BaseModel):
     low_confidence_mappings: List[Dict[str, Any]] = []
     error_message: Optional[str] = None
     retry_count: int = 0
+    force_human_review: bool = False
 
 
 class StateMachine:
@@ -113,6 +114,8 @@ class StateMachine:
             current.low_confidence_mappings = kwargs["low_confidence_mappings"]
         if "error" in kwargs:
             current.error_message = kwargs["error"]
+        if "force_human_review" in kwargs:
+            current.force_human_review = kwargs["force_human_review"]
 
         if new_state == GenerationState.ERROR:
             current.retry_count += 1
@@ -144,6 +147,7 @@ class StateMachine:
         session_id: str,
         validation_issues: List[Dict],
         low_confidence_mappings: List[Dict],
+        force_human_review: bool = False,
     ) -> WorkflowState:
         """Start review phase"""
         return self.transition(
@@ -151,6 +155,7 @@ class StateMachine:
             GenerationState.REVIEWING,
             validation_issues=validation_issues,
             low_confidence_mappings=low_confidence_mappings,
+            force_human_review=force_human_review,
         )
 
     def complete(self, session_id: str) -> WorkflowState:

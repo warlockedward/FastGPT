@@ -526,6 +526,95 @@ Please generate the workflow JSON now."""
             errors=errors,
             warnings=warnings
         )
+
+    async def fix_workflow(
+        self,
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        errors: List[Any]
+    ) -> WorkflowResult:
+        """
+        Attempt to fix workflow validation errors by regenerating problematic nodes.
+        
+        Args:
+            nodes: Current workflow nodes
+            edges: Current workflow edges
+            errors: List of validation errors to fix
+            
+        Returns:
+            WorkflowResult with fixed workflow or original if cannot fix
+        """
+        try:
+            # Build error summary for the LLM
+            error_messages = []
+            for error in errors:
+                if hasattr(error, 'message'):
+                    error_messages.append(error.message)
+                elif hasattr(error, 'message'):
+                    error_messages.append(str(error))
+                else:
+                    error_messages.append(str(error))
+
+            error_summary = "\n".join(f"- {msg}" for msg in error_messages)
+
+            # Try to call LLM to fix the workflow
+            try:
+                fix_prompt = f"""Fix the following workflow validation errors:
+
+{error_summary}
+
+Current workflow nodes:
+{json.dumps(nodes, indent=2)}
+
+Current workflow edges:
+{json.dumps(edges, indent=2)}
+
+Please generate a fixed workflow JSON that resolves these errors. Return ONLY the JSON, no explanation."""
+
+                llm_result = await self._call_llm(
+                    self._build_system_prompt([], [], []),
+                    fix_prompt
+                )
+                fixed_nodes, fixed_edges = self._parse_llm_response(llm_result)
+
+                if fixed_nodes and fixed_edges:
+                    return WorkflowResult(nodes=fixed_nodes, edges=fixed_edges)
+
+            except Exception:
+                # If LLM fix fails, fall back to simple heuristics
+                pass
+
+            # Simple heuristic fix: ensure workflowStart exists
+            node_types = [n.get("flowNodeType") for n in nodes]
+
+            if "workflowStart" not in node_types:
+                # Add workflowStart if missing
+                start_node = self._create_node(
+                    "workflowStart",
+                    self._generate_id(),
+                    0,
+                    len(nodes) + 1
+                )
+                nodes = [start_node] + nodes
+
+            # Ensure all edges reference valid nodes
+            node_ids = set(n.get("nodeId") for n in nodes)
+            valid_edges = [e for e in edges if e.get("source") in node_ids and e.get("target") in node_ids]
+
+            # If no edges exist, create default edges
+            if not valid_edges and len(nodes) > 1:
+                valid_edges = self._create_edges(nodes)
+
+            return WorkflowResult(nodes=nodes, edges=valid_edges)
+
+        except Exception as e:
+            # Return original workflow if fix fails
+            return WorkflowResult(
+                nodes=nodes,
+                edges=edges,
+                is_valid=False,
+                errors=[f"Failed to fix workflow: {str(e)}"]
+            )
     
     async def close(self):
         await self.client.aclose()

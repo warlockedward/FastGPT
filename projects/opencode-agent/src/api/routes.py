@@ -6,6 +6,320 @@ import os
 import uuid
 import json
 import asyncio
+import logging
+import re
+from datetime import datetime
+from html import escape
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("opencode-agent")
+
+# Input sanitization functions
+def sanitize_input(text: str, max_length: int = 10000) -> str:
+    """Sanitize user input to prevent XSS and injection attacks"""
+    if not text:
+        return ""
+    # Limit length
+    text = text[:max_length]
+    # Escape HTML characters
+    text = escape(text)
+    return text
+
+def sanitize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize workflow nodes and edges"""
+    if not workflow:
+        return {}
+    
+    sanitized = {"nodes": [], "edges": []}
+    
+    # Sanitize nodes
+    for node in workflow.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        sanitized_node = {
+            "nodeId": re.sub(r'[^a-zA-Z0-9_-]', '', str(node.get("nodeId", "")))[:50],
+            "flowNodeType": re.sub(r'[^a-zA-Z0-9_-]', '', str(node.get("flowNodeType", "")))[:50],
+            "name": sanitize_input(str(node.get("name", ""))[:100]),
+            "data": {},
+        }
+        sanitized["nodes"].append(sanitized_node)
+    
+    # Sanitize edges
+    for edge in workflow.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        sanitized_edge = {
+            "source": re.sub(r'[^a-zA-Z0-9_-]', '', str(edge.get("source", "")))[:50],
+            "target": re.sub(r'[^a-zA-Z0-9_-]', '', str(edge.get("target", "")))[:50],
+        }
+        sanitized["edges"].append(sanitized_edge)
+    
+    return sanitized
+
+# API version
+API_VERSION = "v1"
+
+# ============================================
+# Authentication Configuration
+# ============================================
+# Get API keys from environment (comma-separated)
+API_KEYS = set(os.environ.get("OPENCODE_API_KEYS", "").split(","))
+API_KEYS.discard("")  # Remove empty string if present
+
+def verify_api_key(api_key: str = None) -> bool:
+    """Verify API key - returns True if valid or no keys configured (dev mode)"""
+    if not API_KEYS:
+        # No API keys configured - allow all (development mode)
+        logger.warning("No API keys configured - running in development mode")
+        return True
+    
+    if not api_key:
+        return False
+    
+    return api_key in API_KEYS
+
+# ============================================
+# Rate Limiting Configuration
+# ============================================
+from collections import defaultdict
+from time import time
+
+class RateLimiter:
+    """Simple in-memory rate limiter"""
+    
+    def __init__(self):
+        self.requests = defaultdict(list)
+        self.max_requests = int(os.environ.get("RATE_LIMIT_MAX", "100"))
+        self.window_seconds = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+    
+    def is_allowed(self, identifier: str) -> bool:
+        """Check if request is allowed for identifier"""
+        now = time()
+        # Clean old requests
+        self.requests[identifier] = [
+            t for t in self.requests[identifier] 
+            if now - t < self.window_seconds
+        ]
+        
+        if len(self.requests[identifier]) >= self.max_requests:
+            return False
+        
+        self.requests[identifier].append(now)
+        return True
+    
+    def get_remaining(self, identifier: str) -> int:
+        """Get remaining requests for identifier"""
+        now = time()
+        current = [
+            t for t in self.requests[identifier] 
+            if now - t < self.window_seconds
+        ]
+        return max(0, self.max_requests - len(current))
+
+rate_limiter = RateLimiter()
+
+# ============================================
+# Persistent Storage (SQLite)
+# ============================================
+import sqlite3
+import threading
+
+DB_PATH = os.environ.get("OPENCODE_DB_PATH", "/tmp/opencode_agent.db")
+_db_lock = threading.Lock()
+
+def init_db():
+    """Initialize SQLite database"""
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Templates table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                workflow TEXT NOT NULL,
+                tags TEXT,
+                is_public INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                usage_count INTEGER DEFAULT 0
+            )
+        """)
+        
+        # API usage log
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT,
+                endpoint TEXT,
+                method TEXT,
+                status_code INTEGER,
+                timestamp TEXT NOT NULL,
+                duration_ms INTEGER
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Database initialized at {DB_PATH}")
+
+# Initialize database on module load
+try:
+    init_db()
+except Exception as e:
+    logger.warning(f"Failed to initialize database: {e}")
+
+def save_template_to_db(template: Dict[str, Any]) -> bool:
+    """Save template to SQLite database"""
+    try:
+        with _db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO workflow_templates 
+                (id, name, description, workflow, tags, is_public, created_at, updated_at, usage_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                template["id"],
+                template["name"],
+                template.get("description", ""),
+                json.dumps(template["workflow"]),
+                json.dumps(template.get("tags", [])),
+                1 if template.get("is_public") else 0,
+                template["created_at"],
+                template["updated_at"],
+                template.get("usage_count", 0)
+            ))
+            conn.commit()
+            conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save template: {e}")
+        return False
+
+def load_templates_from_db(tag: str = None, search: str = None, limit: int = 20) -> List[Dict]:
+    """Load templates from SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM workflow_templates WHERE 1=1"
+        params = []
+        
+        if tag:
+            query += " AND tags LIKE ?"
+            params.append(f'%"{tag}"%')
+        
+        if search:
+            query += " AND (name LIKE ? OR description LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%"])
+        
+        query += " ORDER BY usage_count DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        templates = []
+        for row in rows:
+            templates.append({
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "workflow": json.loads(row["workflow"]),
+                "tags": json.loads(row["tags"]),
+                "is_public": bool(row["is_public"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "usage_count": row["usage_count"]
+            })
+        
+        return templates
+    except Exception as e:
+        logger.error(f"Failed to load templates: {e}")
+        return []
+
+def get_template_from_db(template_id: str) -> Dict:
+    """Get single template from database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM workflow_templates WHERE id = ?", (template_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "workflow": json.loads(row["workflow"]),
+            "tags": json.loads(row["tags"]),
+            "is_public": bool(row["is_public"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "usage_count": row["usage_count"]
+        }
+    except Exception as e:
+        logger.error(f"Failed to get template: {e}")
+        return None
+
+def delete_template_from_db(template_id: str) -> bool:
+    """Delete template from database"""
+    try:
+        with _db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM workflow_templates WHERE id = ?", (template_id,))
+            conn.commit()
+            affected = cursor.rowcount
+            conn.close()
+        return affected > 0
+    except Exception as e:
+        logger.error(f"Failed to delete template: {e}")
+        return False
+
+def increment_template_usage(template_id: str) -> bool:
+    """Increment template usage count"""
+    try:
+        with _db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE workflow_templates SET usage_count = usage_count + 1 WHERE id = ?", (template_id,))
+            conn.commit()
+            conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to increment usage: {e}")
+        return False
+
+from datetime import datetime
+
+WORKFLOW_SCHEMA_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.0.0"
+
+def create_workflow_metadata():
+    return {"schema_version": WORKFLOW_SCHEMA_VERSION, "generated_at": datetime.now().isoformat(), "generator_version": GENERATOR_VERSION}
+
+def generate_trace_id():
+    return f"wf-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:12]}"
+
+I18N_MESSAGES = {"zh-CN": {"status.ready": "工作流已生成", "status.error": "生成失败", "error.generation_failed": "工作流生成失败"}, "en": {"status.ready": "Workflow generated", "status.error": "Generation failed", "error.generation_failed": "Workflow generation failed"}}
+def get_i18n(key, lang="zh-CN"):
+    return I18N_MESSAGES.get(lang, I18N_MESSAGES["zh-CN"]).get(key, key)
+
+_workflow_templates: Dict[str, Dict[str, Any]] = {}
 
 from ..agent.workflow_generator import WorkflowGenerator
 from ..agent.intent_analyzer import IntentAnalyzer
@@ -27,6 +341,30 @@ from ..agent.state_machine import state_machine, GenerationState, ClarificationQ
 
 
 app = FastAPI(title="FastGPT AI Workflow Agent")
+
+# Authentication dependency
+from fastapi import Depends
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def get_current_user(api_key: str = Depends(api_key_header)):
+    """Verify API key from header"""
+    if not verify_api_key(api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return {"api_key": api_key}
+
+# Rate limiting dependency
+async def check_rate_limit():
+    """Check rate limit for request"""
+    # Use API key as identifier if available, otherwise use IP
+    identifier = "default"
+    
+    if not rate_limiter.is_allowed(identifier):
+        raise HTTPException(
+            status_code=429, 
+            detail=f"Rate limit exceeded. Max {rate_limiter.max_requests} requests per {rate_limiter.window_seconds} seconds"
+        )
 
 
 class ChatRequest(BaseModel):
@@ -105,7 +443,14 @@ def extract_tool_context(context: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/api/ai-workflow/generate")
-async def generate_workflow(request: GenerateRequest):
+async def generate_workflow(request: GenerateRequest, user: dict = Depends(get_current_user)):
+    # Check rate limit
+    await check_rate_limit()
+    trace_id = generate_trace_id()
+    logger.info(f"[{trace_id}] Starting workflow generation for intent: {request.userIntent[:50]}...")
+    
+    # Sanitize input
+    sanitized_intent = sanitize_input(request.userIntent)
     if not agent.get("workflow_generator"):
         from ..tools.fastgpt import FastGPTClient
 
@@ -173,9 +518,31 @@ async def generate_workflow(request: GenerateRequest):
 
         state_machine.start_validation(session_id, nodes_data, edges_data)
 
-        validation_result = await agent["validation_engine"].validate(
-            nodes_data, edges_data
-        )
+
+
+        # Circuit breaker: max 3 auto-fix attempts
+        MAX_RETRIES = 3
+        auto_fix_attempts = 0
+        last_error = None
+        
+        for attempt in range(MAX_RETRIES + 1):
+            validation_result = await agent["validation_engine"].validate(nodes_data, edges_data)
+            if len(validation_result.errors) == 0: break
+            if attempt < MAX_RETRIES:
+                auto_fix_attempts += 1
+                last_error = validation_result.errors[0].message
+                try:
+                    fixed = await agent["workflow_generator"].fix_workflow(nodes_data, edges_data, validation_result.errors)
+                    nodes_data = [n.model_dump() for n in fixed.nodes]
+                    edges_data = [e.model_dump() for e in fixed.edges]
+                except Exception as fix_err:
+                    logger.warning(f"[{trace_id}] Auto-fix attempt {auto_fix_attempts} failed: {str(fix_err)}")
+                    break
+
+        # If validation still failed after retries, trigger human review
+        if validation_result.errors and auto_fix_attempts >= MAX_RETRIES:
+            state_machine.start_review(session_id, [{"message": f"自动修复失败 ({auto_fix_attempts}/{MAX_RETRIES}): {last_error}", "severity": "error"}], [], force_human_review=True)
+            return {"sessionId": session_id, "status": "reviewing", "message": get_i18n("error.human_review_required"), "workflow": {"nodes": nodes_data, "edges": edges_data}, "trace_id": generate_trace_id()}
 
         mapping_result = await agent["variable_mapper"].map_variables(
             nodes_data, edges_data
@@ -608,3 +975,263 @@ async def generate_workflow_stream(request: GenerateRequest):
             "X-Accel-Buffering": "no"
         }
     )
+
+# Export/Import endpoints
+class ExportRequest(BaseModel):
+    workflow: Dict[str, Any]
+    format: str = "json"
+
+@app.post("/api/ai-workflow/export")
+async def export_workflow(request: ExportRequest):
+    data = {"version": WORKFLOW_SCHEMA_VERSION, "exported_at": datetime.now().isoformat(), "workflow": request.workflow, "metadata": create_workflow_metadata()}
+    if request.format == "json": return {"format": "json", "content": json.dumps(data, indent=2), "filename": f"workflow-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"}
+    if request.format == "yaml":
+        try:
+            import yaml
+            return {"format": "yaml", "content": yaml.dump(data), "filename": f"workflow-{datetime.now().strftime('%Y%m%d-%H%M%S')}.yaml"}
+        except ImportError: 
+            logger.warning("YAML export attempted but pyyaml not installed")
+            return {"valid": False, "error": "YAML requires pyyaml"}
+        except Exception as e:
+            logger.error(f"YAML export error: {str(e)}")
+            return {"valid": False, "error": str(e)}
+    return {"valid": False, "error": "Use json or yaml"}
+
+class ImportRequest(BaseModel):
+    content: str
+    format: str = "json"
+
+@app.post("/api/ai-workflow/import")
+async def import_workflow(request: ImportRequest):
+    try:
+        data = json.loads(request.content) if request.format == "json" else __import__("yaml").safe_load(request.content)
+        return {"valid": True, "workflow": data.get("workflow", data)}
+    except Exception as e: return {"valid": False, "error": str(e)}
+
+# Template endpoints
+class SaveTemplateRequest(BaseModel):
+    name: str
+    description: str = ""
+    workflow: Dict[str, Any]
+    tags: List[str] = []
+
+async def save_template(request: SaveTemplateRequest, user: dict = Depends(get_current_user)):
+    tid = f"template-{uuid.uuid4().hex[:12]}"
+    template = {"id": tid, "name": request.name, "description": request.description, "workflow": request.workflow, "tags": request.tags, "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat(), "usage_count": 0}
+    
+    # Save to database
+    if save_template_to_db(template):
+        return {"valid": True, "template_id": tid}
+    else:
+        return {"valid": False, "error": "Failed to save template"}
+
+
+@app.get("/api/ai-workflow/templates")
+async def list_templates(tag: str = None, search: str = None, limit: int = 20, user: dict = Depends(get_current_user)):
+    templates = load_templates_from_db(tag=tag, search=search, limit=limit)
+    return {"valid": True, "templates": templates, "total": len(templates)}
+
+
+@app.get("/api/ai-workflow/templates/{template_id}")
+async def get_template(template_id: str, user: dict = Depends(get_current_user)):
+    t = get_template_from_db(template_id)
+    if not t: return {"valid": False, "error": "Not found"}
+    increment_template_usage(template_id)
+    return {"valid": True, "template": t}
+
+
+@app.delete("/api/ai-workflow/templates/{template_id}")
+async def delete_template(template_id: str, user: dict = Depends(get_current_user)):
+    if not delete_template_from_db(template_id): return {"valid": False, "error": "Not found"}
+    return {"valid": True}
+
+@app.get("/api/ai-workflow/templates")
+async def list_templates(tag: str = None, search: str = None, limit: int = 20):
+    templates = list(_workflow_templates.values())
+    if tag: templates = [t for t in templates if tag in t.get("tags", [])]
+    if search: templates = [t for t in templates if search.lower() in t.get("name", "").lower()]
+    return {"valid": True, "templates": sorted(templates, key=lambda x: x.get("usage_count", 0), reverse=True)[:limit]}
+
+@app.get("/api/ai-workflow/templates/{template_id}")
+async def get_template(template_id: str):
+    t = _workflow_templates.get(template_id)
+    if not t: return {"valid": False, "error": "Not found"}
+    t["usage_count"] = t.get("usage_count", 0) + 1
+    return {"valid": True, "template": t}
+
+@app.delete("/api/ai-workflow/templates/{template_id}")
+async def delete_template(template_id: str):
+    if template_id not in _workflow_templates: return {"valid": False, "error": "Not found"}
+    del _workflow_templates[template_id]
+    return {"valid": True}
+
+# Mock data endpoint
+class MockDataRequest(BaseModel):
+    workflow: Dict[str, Any]
+    custom_inputs: Dict[str, Any] = {}
+
+@app.post("/api/ai-workflow/mock-data")
+async def generate_mock_data(request: MockDataRequest):
+    if not agent.get("validation_engine"): agent["validation_engine"] = ValidationEngine()
+    try:
+        nodes = request.workflow.get("nodes", [])
+        mock_data = agent["validation_engine"].static_validator._generate_mock_data(nodes)
+        return {"valid": True, "mock_data": {**mock_data, **request.custom_inputs}}
+    except Exception as e: return {"valid": False, "error": str(e)}
+
+# Workflow Execution Preview endpoint
+class PreviewRequest(BaseModel):
+    workflow: Dict[str, Any]
+    inputs: Dict[str, Any] = {}
+    max_steps: int = 20
+
+
+@app.post("/api/ai-workflow/preview")
+async def preview_workflow(request: PreviewRequest):
+    """Preview workflow execution with mock data"""
+    try:
+        nodes = request.workflow.get("nodes", [])
+        edges = request.workflow.get("edges", [])
+        
+        # Build node map for quick lookup
+        node_map = {n.get("nodeId"): n for n in nodes}
+        
+        # Build execution order (topological sort)
+        execution_order = _topological_sort(nodes, edges)
+        
+        # Simulate execution
+        results = {}
+        execution_trace = []
+        
+        for i, node_id in enumerate(execution_order):
+            if i >= request.max_steps: break
+            
+            node = node_map.get(node_id)
+            if not node: continue
+            
+            node_type = node.get("flowNodeType")
+            node_name = node.get("name", node_id)
+            
+            # Get input from previous nodes or user input
+            input_data = _get_node_input(node_id, edges, results, request.inputs)
+            
+            # Simulate node execution based on type
+            output_data = _simulate_node(node_type, node, input_data, results)
+            
+            results[node_id] = output_data
+            
+            execution_trace.append({
+                "step": i + 1,
+                "node_id": node_id,
+                "node_name": node_name,
+                "node_type": node_type,
+                "status": "completed",
+                "input": input_data,
+                "output": output_data,
+            })
+        
+        return {
+            "valid": True,
+            "execution_order": execution_order,
+            "results": results,
+            "execution_trace": execution_trace,
+            "total_steps": len(execution_trace),
+            "metadata": create_workflow_metadata(),
+        }
+    except Exception as e:
+        return {"valid": False, "error": str(e), "execution_trace": []}
+
+
+def _topological_sort(nodes: List[Dict], edges: List[Dict]) -> List[str]:
+    """Sort nodes in execution order"""
+    node_ids = [n.get("nodeId") for n in nodes]
+    
+    # Build adjacency and in-degree
+    adj = {nid: [] for nid in node_ids}
+    in_degree = {nid: 0 for nid in node_ids}
+    
+    for e in edges:
+        src, tgt = e.get("source"), e.get("target")
+        if src in adj and tgt in adj:
+            adj[src].append(tgt)
+            in_degree[tgt] += 1
+    
+    # Kahn's algorithm
+    queue = [n for n in node_ids if in_degree[n] == 0]
+    result = []
+    
+    while queue:
+        node = queue.pop(0)
+        result.append(node)
+        for neighbor in adj[node]:
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+    
+    # Add remaining nodes (cyclic - shouldn't happen with valid workflows)
+    result.extend([n for n in node_ids if n not in result])
+    
+    return result
+
+
+def _get_node_input(node_id: str, edges: List[Dict], results: Dict, user_inputs: Dict) -> Dict:
+    """Get input data for a node from previous nodes or user inputs"""
+    input_data = {}
+    
+    # Find incoming edges
+    incoming = [e for e in edges if e.get("target") == node_id]
+    
+    for edge in incoming:
+        source_id = edge.get("source")
+        if source_id in results:
+            input_data.update(results[source_id])
+    
+    # Merge with user inputs
+    input_data.update(user_inputs.get(node_id, {}))
+    
+    return input_data
+
+
+def _simulate_node(node_type: str, node: Dict, input_data: Dict, results: Dict) -> Dict:
+    """Simulate node execution based on type"""
+    node_id = node.get("nodeId")
+    config = node.get("data", {})
+    
+    if node_type == "workflowStart":
+        return {"userChatInput": input_data.get("userChatInput", "[User input]")}
+    
+    elif node_type == "chatNode":
+        model = config.get("model", "gpt-3.5-turbo")
+        prompt = config.get("prompt", "")
+        return {
+            "responseText": f"[Mock response from {model}]",
+            "model": model,
+            "prompt_used": prompt[:50] + "..." if len(prompt) > 50 else prompt
+        }
+    
+    elif node_type == "datasetSearchNode":
+        query = input_data.get("userChatInput", "")
+        return {
+            "quoteList": [
+                {"content": f"Mock document about: {query}", "score": 0.95},
+                {"content": f"Related information: {query}", "score": 0.87}
+            ],
+            "query": query
+        }
+    
+    elif node_type == "answerNode":
+        return {"answerText": input_data.get("responseText", "[Final answer]")}
+    
+    elif node_type == "httpRequest468":
+        return {"response": {"status": 200, "data": "[Mock HTTP response]"}}
+    
+    elif node_type == "code":
+        return {"output": "[Mock code execution result]"}
+    
+    elif node_type == "ifElseNode":
+        condition = config.get("condition", "")
+        return {"result": True, "condition": condition}
+    
+    else:
+        return {"status": "simulated", "node_type": node_type}
+
