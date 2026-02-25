@@ -4,6 +4,13 @@ from typing import Optional, List, Dict, Any
 import os
 import uuid
 
+from ..agent.workflow_generator import WorkflowGenerator
+from ..agent.intent_analyzer import IntentAnalyzer
+from ..agent.variable_mapper import VariableMappingEngine, ConfidenceLevel
+from ..agent.validation_engine import ValidationEngine, ValidationLevel
+from ..agent.rag_knowledge_base import RAGKnowledgeBase, CaseStatus
+from ..agent.state_machine import state_machine, GenerationState, ClarificationQuestion
+
 
 app = FastAPI(title="FastGPT AI Workflow Agent")
 
@@ -25,6 +32,7 @@ class ConfirmRequest(BaseModel):
     sessionId: str
     answer: str
     context: Optional[Dict[str, Any]] = {}
+    confirmed: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -36,7 +44,7 @@ class ChatResponse(BaseModel):
 
 
 fastgpt_client = None
-agent = None
+agent = {}
 
 
 @app.get("/health")
@@ -47,290 +55,317 @@ async def health():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     global agent
-    if agent is None:
+    if not agent.get("workflow_agent"):
         from ..tools.fastgpt import FastGPTClient
         from ..agent.core import WorkflowAgent
-        
+
         fastgpt_base_url = os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
         fastgpt_api_key = os.environ.get("FASTGPT_API_KEY", "")
-        
+
         fastgpt_client = FastGPTClient(
-            base_url=fastgpt_base_url,
-            api_key=fastgpt_api_key
+            base_url=fastgpt_base_url, api_key=fastgpt_api_key
         )
-        agent = WorkflowAgent(fastgpt_client)
-    
-    result = await agent.chat(request.team_id, request.message)
+        agent["workflow_agent"] = WorkflowAgent(fastgpt_client)
+
+    result = await agent["workflow_agent"].chat(request.team_id, request.message)
     return ChatResponse(
         session_id=request.session_id or str(uuid.uuid4()),
         message=result.get("message", ""),
-        workflow=result.get("workflow")
+        workflow=result.get("workflow"),
     )
 
 
 def extract_tool_context(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract available plugins, node types, and categories from request context"""
     available_plugins = context.get("availablePlugins", [])
     node_types = context.get("nodeTypes", [])
     categories = context.get("categories", [])
-    
-    # If availablePlugins is a list of strings (old format), convert to dict format
+
     if available_plugins and isinstance(available_plugins[0], str):
         available_plugins = [{"name": p} for p in available_plugins]
-    
+
     return {
         "availablePlugins": available_plugins,
         "nodeTypes": node_types,
-        "categories": categories
+        "categories": categories,
     }
 
 
 @app.post("/api/ai-workflow/generate")
 async def generate_workflow(request: GenerateRequest):
-    """Generate a new workflow from user intent"""
-    global agent
-    if agent is None:
+    if not agent.get("workflow_generator"):
         from ..tools.fastgpt import FastGPTClient
-        from ..agent.workflow_generator import WorkflowGenerator
-        from ..agent.intent_analyzer import IntentAnalyzer
-        
+
         fastgpt_base_url = os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
         fastgpt_api_key = os.environ.get("FASTGPT_API_KEY", "")
-        
+
         fastgpt_client = FastGPTClient(
-            base_url=fastgpt_base_url,
-            api_key=fastgpt_api_key
+            base_url=fastgpt_base_url, api_key=fastgpt_api_key
         )
-        
+
         intent_analyzer = IntentAnalyzer()
         workflow_gen = WorkflowGenerator()
-        agent = {
-            "client": fastgpt_client,
-            "intent_analyzer": intent_analyzer,
-            "workflow_generator": workflow_gen
-        }
-    
+        variable_mapper = VariableMappingEngine()
+        validation_engine = ValidationEngine()
+        rag_kb = RAGKnowledgeBase()
+
+        agent["client"] = fastgpt_client
+        agent["intent_analyzer"] = intent_analyzer
+        agent["workflow_generator"] = workflow_gen
+        agent["variable_mapper"] = variable_mapper
+        agent["validation_engine"] = validation_engine
+        agent["rag_kb"] = rag_kb
+
+    session_id = request.sessionId or str(uuid.uuid4())
+
     try:
-        intent_result = await agent["intent_analyzer"].analyze(request.userIntent)
-        
-        tool_context = extract_tool_context(request.context or {})
-        
+        session = state_machine.create_session(session_id, request.userIntent)
+
+        state_machine.start_generation(session_id)
+
+        context = request.context or {}
+
+        rag_context = await agent["rag_kb"].get_system_prompt_context(
+            request.userIntent
+        )
+
+        enhanced_requirements = request.userIntent
+        if rag_context:
+            enhanced_requirements += f"\n\n{rag_context}"
+
+        intent_result = await agent["intent_analyzer"].analyze(enhanced_requirements)
+
+        tool_context = extract_tool_context(context)
+
         workflow_result = await agent["workflow_generator"].generate(
             intent=intent_result.intent.value,
             complexity=intent_result.complexity.value,
-            requirements=request.userIntent,
+            requirements=enhanced_requirements,
             available_plugins=tool_context["availablePlugins"],
             node_types=tool_context["nodeTypes"],
-            categories=tool_context["categories"]
+            categories=tool_context["categories"],
         )
-        
-        session_id = request.sessionId or str(uuid.uuid4())
-        
+
+        if not workflow_result.is_valid:
+            state_machine.error(session_id, "Workflow generation failed")
+            return {
+                "sessionId": session_id,
+                "status": "error",
+                "message": "工作流生成失败",
+                "workflow": None,
+            }
+
+        nodes_data = [n.model_dump() for n in workflow_result.nodes]
+        edges_data = [e.model_dump() for e in workflow_result.edges]
+
+        state_machine.start_validation(session_id, nodes_data, edges_data)
+
+        validation_result = await agent["validation_engine"].validate(
+            nodes_data, edges_data
+        )
+
+        mapping_result = await agent["variable_mapper"].map_variables(
+            nodes_data, edges_data
+        )
+
+        low_conf_mappings = [
+            {
+                "source_node_id": m.source_node_id,
+                "source_variable": m.source_variable,
+                "target_node_id": m.target_node_id,
+                "target_variable": m.target_variable,
+                "confidence": m.confidence,
+            }
+            for m in mapping_result.mappings
+            if m.confidence_level == ConfidenceLevel.MEDIUM
+        ]
+
+        if low_conf_mappings or validation_result.warnings:
+            state_machine.start_review(
+                session_id,
+                [
+                    {"message": i.message, "severity": i.severity.value}
+                    for i in validation_result.issues
+                ],
+                low_conf_mappings,
+            )
+
+            return {
+                "sessionId": session_id,
+                "status": "reviewing",
+                "message": "工作流已生成，需要确认以下内容",
+                "workflow": {"nodes": nodes_data, "edges": edges_data},
+                "validation_issues": [
+                    {"message": i.message, "severity": i.severity.value}
+                    for i in validation_result.issues
+                ],
+                "low_confidence_mappings": low_conf_mappings,
+                "suggestions": None,
+            }
+
+        state_machine.complete(session_id)
+
+        await agent["rag_kb"].store_case(
+            intent=request.userIntent,
+            nodes=nodes_data,
+            edges=edges_data,
+            key_prompts=enhanced_requirements[:500],
+            version="v1",
+            tags=[intent_result.intent.value, intent_result.complexity.value],
+            status=CaseStatus.SUCCESS,
+        )
+
         return {
             "sessionId": session_id,
-            "status": "ready" if workflow_result.is_valid else "failed",
-            "message": "工作流已生成" if workflow_result.is_valid else "工作流生成失败",
-            "workflow": {
-                "nodes": [n.model_dump() for n in workflow_result.nodes],
-                "edges": [e.model_dump() for e in workflow_result.edges]
-            } if workflow_result.is_valid else None,
+            "status": "ready",
+            "message": "工作流已生成",
+            "workflow": {"nodes": nodes_data, "edges": edges_data},
             "questions": None,
-            "suggestions": None
+            "suggestions": None,
         }
+
     except Exception as e:
+        state_machine.error(session_id, str(e))
         return {
-            "sessionId": request.sessionId or str(uuid.uuid4()),
+            "sessionId": session_id,
             "status": "error",
             "message": f"生成失败: {str(e)}",
-            "workflow": None
-        }
-
-
-@app.post("/api/ai-workflow/optimize")
-async def optimize_workflow(request: GenerateRequest):
-    global agent
-    if agent is None:
-        from ..tools.fastgpt import FastGPTClient
-        from ..agent.workflow_generator import WorkflowGenerator
-        from ..agent.intent_analyzer import IntentAnalyzer
-        
-        fastgpt_base_url = os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
-        fastgpt_api_key = os.environ.get("FASTGPT_API_KEY", "")
-        
-        fastgpt_client = FastGPTClient(
-            base_url=fastgpt_base_url,
-            api_key=fastgpt_api_key
-        )
-        
-        intent_analyzer = IntentAnalyzer()
-        workflow_gen = WorkflowGenerator()
-        agent = {
-            "client": fastgpt_client,
-            "intent_analyzer": intent_analyzer,
-            "workflow_generator": workflow_gen
-        }
-    
-    try:
-        existing_workflow = request.context.get("existingWorkflow") if request.context else None
-        
-        if not existing_workflow:
-            return {
-                "sessionId": request.sessionId or str(uuid.uuid4()),
-                "status": "error",
-                "message": "需要提供现有工作流进行优化",
-                "workflow": None
-            }
-        
-        intent_result = await agent["intent_analyzer"].analyze(request.userIntent)
-        
-        tool_context = extract_tool_context(request.context or {})
-        
-        workflow_result = await agent["workflow_generator"].generate(
-            intent="modify_workflow",
-            complexity=intent_result.complexity.value,
-            requirements=request.userIntent,
-            available_plugins=tool_context["availablePlugins"],
-            node_types=tool_context["nodeTypes"],
-            categories=tool_context["categories"]
-        )
-        
-        session_id = request.sessionId or str(uuid.uuid4())
-        
-        return {
-            "sessionId": session_id,
-            "status": "ready" if workflow_result.is_valid else "failed",
-            "message": "工作流已优化" if workflow_result.is_valid else "工作流优化失败",
-            "workflow": {
-                "nodes": [n.model_dump() for n in workflow_result.nodes],
-                "edges": [e.model_dump() for e in workflow_result.edges]
-            } if workflow_result.is_valid else None,
-            "questions": None,
-            "suggestions": None
-        }
-    except Exception as e:
-        return {
-            "sessionId": request.sessionId or str(uuid.uuid4()),
-            "status": "error",
-            "message": f"优化失败: {str(e)}",
-            "workflow": None
-        }
-
-
-@app.post("/api/ai-workflow/confirm")
-async def confirm_workflow(request: ConfirmRequest):
-    global agent
-    if agent is None:
-        from ..tools.fastgpt import FastGPTClient
-        from ..agent.workflow_generator import WorkflowGenerator
-        from ..agent.intent_analyzer import IntentAnalyzer
-        
-        fastgpt_base_url = os.environ.get("FASTGPT_API_URL", "http://fastgpt:3000")
-        fastgpt_api_key = os.environ.get("FASTGPT_API_KEY", "")
-        
-        fastgpt_client = FastGPTClient(
-            base_url=fastgpt_base_url,
-            api_key=fastgpt_api_key
-        )
-        
-        intent_analyzer = IntentAnalyzer()
-        workflow_gen = WorkflowGenerator()
-        agent = {
-            "client": fastgpt_client,
-            "intent_analyzer": intent_analyzer,
-            "workflow_generator": workflow_gen
-        }
-    
-    try:
-        session_id = request.sessionId or str(uuid.uuid4())
-        
-        if request.confirmed:
-            return {
-                "sessionId": session_id,
-                "status": "completed",
-                "message": "工作流已确认保存",
-                "workflow": None,
-                "questions": None
-            }
-        
-        user_answer = request.answer or ""
-        
-        if not user_answer:
-            return {
-                "sessionId": session_id,
-                "status": "need_more_info",
-                "message": "请提供答案继续生成工作流",
-                "workflow": None,
-                "questions": None
-            }
-        
-        context = request.context or {}
-        previous_workflow = context.get("previousWorkflow")
-        
-        prompt = f"用户回答: {user_answer}"
-        if previous_workflow:
-            prompt += f"\n基于之前的工作流继续优化"
-        
-        intent_result = await agent["intent_analyzer"].analyze(prompt)
-        
-        tool_context = extract_tool_context(context)
-        
-        workflow_result = await agent["workflow_generator"].generate(
-            intent="create_workflow",
-            complexity=intent_result.complexity.value,
-            requirements=prompt,
-            available_plugins=tool_context["availablePlugins"],
-            node_types=tool_context["nodeTypes"],
-            categories=tool_context["categories"]
-        )
-        
-        return {
-            "sessionId": session_id,
-            "status": "ready" if workflow_result.is_valid else "need_more_info",
-            "message": "基于您的回答，工作流已更新" if workflow_result.is_valid else "请提供更多信息",
-            "workflow": {
-                "nodes": [n.model_dump() for n in workflow_result.nodes],
-                "edges": [e.model_dump() for n in workflow_result.edges]
-            } if workflow_result.is_valid else None,
-            "questions": None
-        }
-    except Exception as e:
-        return {
-            "sessionId": request.sessionId or str(uuid.uuid4()),
-            "status": "error",
-            "message": f"确认失败: {str(e)}",
             "workflow": None,
-            "questions": None
         }
-
-
-class ValidateRequest(BaseModel):
-    workflow: Optional[Dict[str, Any]] = None
-    plugins: Optional[List[Dict[str, Any]]] = None
 
 
 @app.post("/api/ai-workflow/validate")
 async def validate_workflow(request: ValidateRequest):
-    global agent
-    if agent is None:
-        from ..agent.workflow_generator import WorkflowGenerator
-        workflow_gen = WorkflowGenerator()
-        agent = {"workflow_generator": workflow_gen}
-    
+    if not agent.get("validation_engine"):
+        agent["validation_engine"] = ValidationEngine()
+
     try:
         workflow = request.workflow or {}
         nodes = workflow.get("nodes", [])
         edges = workflow.get("edges", [])
-        
-        result = await agent["workflow_generator"].validate(nodes, edges)
-        
+
+        result = await agent["validation_engine"].validate(nodes, edges)
+
         return {
             "valid": result.is_valid,
-            "errors": result.errors,
-            "suggestions": result.warnings
+            "errors": [
+                {
+                    "message": i.message,
+                    "severity": i.severity.value,
+                    "level": i.level.value,
+                }
+                for i in result.errors
+            ],
+            "warnings": [
+                {
+                    "message": i.message,
+                    "severity": i.severity.value,
+                    "level": i.level.value,
+                }
+                for i in result.warnings
+            ],
+            "passed_levels": [l.value for l in result.passed_levels],
         }
     except Exception as e:
         return {
             "valid": False,
-            "errors": [str(e)],
-            "suggestions": []
+            "errors": [{"message": str(e), "severity": "error", "level": "static"}],
+            "warnings": [],
+            "passed_levels": [],
         }
+
+
+@app.post("/api/ai-workflow/map-variables")
+async def map_variables(request: ValidateRequest):
+    if not agent.get("variable_mapper"):
+        agent["variable_mapper"] = VariableMappingEngine()
+
+    try:
+        workflow = request.workflow or {}
+        nodes = workflow.get("nodes", [])
+        edges = workflow.get("edges", [])
+
+        result = await agent["variable_mapper"].map_variables(nodes, edges)
+
+        return {
+            "mappings": [
+                {
+                    "source_node_id": m.source_node_id,
+                    "source_variable": m.source_variable,
+                    "target_node_id": m.target_node_id,
+                    "target_variable": m.target_variable,
+                    "confidence": m.confidence,
+                    "confidence_level": m.confidence_level.value,
+                    "reason": m.reason,
+                }
+                for m in result.mappings
+            ],
+            "unmapped_inputs": result.unmapped_inputs,
+            "unmapped_outputs": result.unmapped_outputs,
+            "automated_mappings": [
+                {"source": m.source_variable, "target": m.target_variable}
+                for m in result.mappings
+                if m.confidence_level == ConfidenceLevel.HIGH
+            ],
+            "confirm_mappings": [
+                {
+                    "source": m.source_variable,
+                    "target": m.target_variable,
+                    "confidence": m.confidence,
+                }
+                for m in result.mappings
+                if m.confidence_level == ConfidenceLevel.MEDIUM
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai-workflow/state/{session_id}")
+async def get_state(session_id: str):
+    state = state_machine.get_state(session_id)
+    if not state:
+        return {"error": "Session not found"}
+
+    return {
+        "session_id": session_id,
+        "state": state.state.value,
+        "lock_info": state_machine.get_lock_info(session_id),
+        "nodes": state.nodes,
+        "edges": state.edges,
+    }
+
+
+@app.post("/api/ai-workflow/state/{session_id}/confirm-mappings")
+async def confirm_mappings(session_id: str, mappings: List[Dict]):
+    state = state_machine.get_state(session_id)
+    if not state:
+        return {"error": "Session not found"}
+
+    for m in mappings:
+        state.edges.append(
+            {
+                "source": m.get("source_node_id"),
+                "sourceHandle": "out",
+                "target": m.get("target_node_id"),
+                "targetHandle": "in",
+            }
+        )
+
+    state_machine.complete(session_id)
+
+    return {"status": "completed", "session_id": session_id}
+
+
+@app.post("/api/ai-workflow/feedback")
+async def record_feedback(request: Dict):
+    if not agent.get("rag_kb"):
+        agent["rag_kb"] = RAGKnowledgeBase()
+
+    case_id = request.get("case_id")
+    was_modified = request.get("was_modified", False)
+    error_log = request.get("error_log")
+
+    if case_id:
+        await agent["rag_kb"].record_feedback(case_id, was_modified, error_log)
+
+    return {"status": "recorded"}
