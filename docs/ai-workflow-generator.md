@@ -469,3 +469,92 @@ FASTGPT_API_KEY=your-fastgpt-api-key
 - [FastGPT 官方文档](https://doc.fastgpt.cn)
 - [vLLM 官方文档](https://docs.vllm.ai)
 - [Qwen 模型](https://qwen.readthedocs.io/)
+- [FastGPT 官方文档](https://doc.fastgpt.cn)
+- [vLLM 官方文档](https://docs.vllm.ai)
+- [Qwen 模型](https://qwen.readthedocs.io/)
+
+---
+
+# 更新日志 (2026-02-25)
+
+## 新增功能
+
+### 1. 流式生成 (Streaming Generation)
+- 支持 SSE 流式输出，实时展示工作流生成进度
+- 端点: `POST /api/ai-workflow/generate/stream`
+
+### 2. 熔断器 (Circuit Breaker)
+- 自动修复验证失败的工作流，最多 3 次尝试
+- 超过次数后触发人工审核
+
+### 3. 工作流模板 (Workflow Templates)
+- 保存和加载工作流模板
+- 支持标签搜索和名称搜索
+- SQLite 持久化存储
+- 端点: `POST/GET/DELETE /api/ai-workflow/templates/*`
+
+### 4. 增强验证 (Enhanced Validation)
+- 循环依赖检测
+- 节点命名规范检查
+- 必需配置验证
+- 性能警告
+
+### 5. 工作流导出/导入
+- 支持 JSON 和 YAML 格式
+- 端点: `/api/ai-workflow/export`, `/api/ai-workflow/import`
+
+### 6. 模拟数据生成 & 预览
+- 端点: `/api/ai-workflow/mock-data`, `/api/ai-workflow/preview`
+
+### 7. 国际化
+- 支持 zh-CN, en, zh-Hant
+
+### 8. 安全特性
+- API 密钥认证
+- 请求频率限制
+- 输入净化
+- 结构化日志
+
+## API 完整端点列表
+
+| 方法 | 端点 | 认证 |
+|------|------|------|
+| POST | `/api/ai-workflow/generate` | ✅ |
+| POST | `/api/ai-workflow/generate/stream` | ✅ |
+| POST | `/api/ai-workflow/validate` | ✅ |
+| POST | `/api/ai-workflow/export` | ✅ |
+| POST | `/api/ai-workflow/import` | ✅ |
+| POST | `/api/ai-workflow/templates/save` | ✅ |
+| GET | `/api/ai-workflow/templates` | ✅ |
+| DELETE | `/api/ai-workflow/templates/{id}` | ✅ |
+| POST | `/api/ai-workflow/mock-data` | ✅ |
+| POST | `/api/ai-workflow/preview` | ✅ |
+| GET | `/health` | ❌ |
+
+## 环境变量
+
+```bash
+# API 认证
+OPENCODE_API_KEYS=key1,key2
+
+# 频率限制
+RATE_LIMIT_MAX=100
+RATE_LIMIT_WINDOW=60
+
+# 数据库
+OPENCODE_DB_PATH=/tmp/opencode_agent.db
+```
+
+## 使用示例
+
+```bash
+# 认证请求
+curl -X POST http://localhost:8080/api/ai-workflow/generate \
+  -H "X-API-Key: your-api-key" \
+  -d '{"userIntent": "创建工作流"}'
+
+# 导出 JSON
+curl -X POST http://localhost:8080/api/ai-workflow/export \
+  -H "X-API-Key: your-api-key" \
+  -d '{"workflow": {...}, "format": "json"}'
+```
