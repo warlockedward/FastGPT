@@ -46,3 +46,6 @@ projects/app/worker/
 
 # Worktrees
 .worktrees/
+
+# Editor Local History
+.history/
